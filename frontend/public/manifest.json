@@ -1,0 +1,24 @@
+{
+  "name": "СтудБиржа",
+  "short_name": "СтудБиржа",
+  "description": "Биржа студенческих услуг",
+  "start_url": "/reshbirga/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#14a89a",
+  "background_color": "#1a2332",
+  "icons": [
+    {
+      "src": "/reshbirga/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/reshbirga/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

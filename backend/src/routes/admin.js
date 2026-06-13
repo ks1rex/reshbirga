@@ -1,0 +1,668 @@
+const { Router } = require('express');
+const auth = require('../middleware/auth');
+const adminMiddleware = require('../middleware/admin');
+const supabase = require('../supabase_client');
+const { serverError } = require('../utils/httpError');
+
+const router = Router();
+router.use(auth, adminMiddleware);
+
+// GET /admin/ledger — read-only transaction log with filters
+router.get('/ledger', async (req, res) => {
+  const { type, nickname, date_from, date_to } = req.query;
+
+  let q = supabase
+    .from('transactions')
+    .select(`
+      id, type, amount, status, created_at, order_id,
+      user:profiles!transactions_user_id_fkey(id, nickname)
+    `)
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  if (type) q = q.eq('type', type);
+  if (date_from) q = q.gte('created_at', date_from);
+  if (date_to)   q = q.lte('created_at', date_to);
+
+  const { data, error } = await q;
+  if (error) return serverError(res, error);
+
+  let result = data ?? [];
+  if (nickname?.trim()) {
+    const s = nickname.trim().toLowerCase();
+    result = result.filter(tx => tx.user?.nickname?.toLowerCase().includes(s));
+  }
+
+  res.json(result);
+});
+
+// ─── Disputes ───────────────────────────────────────────────
+
+// GET /admin/disputes?status=open
+router.get('/disputes', async (req, res) => {
+  const { status } = req.query;
+
+  let q = supabase
+    .from('disputes')
+    .select(`
+      id, reason, status, created_at,
+      opened_by_profile:profiles!disputes_opened_by_fkey(id, nickname),
+      orders!inner(
+        id, title, order_type, base_amount, final_amount, commission_amount, reserved_amount, status,
+        customer:profiles!orders_customer_id_fkey(id, nickname),
+        executor:profiles!orders_executor_id_fkey(id, nickname)
+      )
+    `)
+    .order('created_at', { ascending: false });
+
+  if (status) q = q.eq('status', status);
+  else q = q.eq('status', 'open');
+
+  const { data, error } = await q;
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/disputes/:id/resolve
+router.post('/disputes/:id/resolve', async (req, res) => {
+  const { id } = req.params;
+  const { resolution, admin_comment, ban_customer, ban_executor } = req.body;
+
+  // site_error is an alias for refund_customer
+  const normalised = resolution === 'site_error' ? 'refund_customer' : resolution;
+  if (!['pay_executor', 'refund_customer'].includes(normalised))
+    return res.status(400).json({ error: 'Invalid resolution' });
+
+  const DISPUTE_STATUS = { pay_executor: 'resolved_pay_executor', refund_customer: 'resolved_refund_customer' };
+  const now            = new Date().toISOString();
+
+  // Atomically claim the dispute: only the first resolver flips it out of 'open'
+  // and proceeds to move money. Concurrent/double calls get 0 rows -> 409, so no
+  // double payout (idempotency guard, same pattern as deposits/withdrawals).
+  const { data: claimedRows, error: claimErr } = await supabase
+    .from('disputes')
+    .update({
+      status: DISPUTE_STATUS[normalised],
+      admin_comment: admin_comment ?? null,
+      resolved_by: req.userId,
+      resolved_at: now,
+    })
+    .eq('id', id).eq('status', 'open')
+    .select(`id, orders!inner(id, customer_id, executor_id, final_amount, reserved_amount, deposit_amount)`);
+
+  if (claimErr) return serverError(res, claimErr, 'dispute:resolve:claim');
+  if (!claimedRows?.length) return res.status(409).json({ error: 'Спор уже разрешён или не найден' });
+
+  const order      = claimedRows[0].orders;
+  const finalAmt   = Math.round(parseFloat(order.final_amount ?? order.reserved_amount) * 100) / 100;
+  const depositAmt = Math.round(parseFloat(order.deposit_amount ?? 0) * 100) / 100;
+  const refAmt     = Math.round(parseFloat(order.reserved_amount) * 100) / 100;
+
+  if (normalised === 'pay_executor') {
+    await supabase.from('orders').update({ status: 'completed', completed_at: now }).eq('id', order.id);
+    // Executor gets final_amount (price)
+    await supabase.rpc('add_wallet_balance', { p_user_id: order.executor_id, p_amount: finalAmt });
+    await supabase.from('transactions').insert({
+      user_id: order.executor_id, order_id: order.id,
+      type: 'order_payout', amount: finalAmt, status: 'completed',
+    });
+    // Deposit is forfeited to executor (if any)
+    if (depositAmt > 0) {
+      await supabase.rpc('add_wallet_balance', { p_user_id: order.executor_id, p_amount: depositAmt });
+      await supabase.from('transactions').insert({
+        user_id: order.executor_id, order_id: order.id,
+        type: 'deposit_forfeit', amount: depositAmt, status: 'completed',
+      });
+    }
+  } else {
+    // Full refund including deposit
+    await supabase.from('orders').update({ status: 'cancelled' }).eq('id', order.id);
+    await supabase.rpc('add_wallet_balance', { p_user_id: order.customer_id, p_amount: refAmt });
+    await supabase.from('transactions').insert({
+      user_id: order.customer_id, order_id: order.id,
+      type: 'dispute_refund_customer', amount: refAmt, status: 'completed',
+    });
+  }
+
+  // Optional bans
+  if (ban_customer)  await supabase.from('profiles').update({ is_banned: true }).eq('id', order.customer_id);
+  if (ban_executor)  await supabase.from('profiles').update({ is_banned: true }).eq('id', order.executor_id);
+
+  res.json({ success: true });
+});
+
+// ─── Contact-exchange orders ─────────────────────────────────
+
+// GET /admin/contact-exchange-orders?status=
+router.get('/contact-exchange-orders', async (req, res) => {
+  const { status } = req.query;
+
+  let q = supabase
+    .from('orders')
+    .select(`
+      id, title, status, contact_exchange_reason, deposit_amount, created_at,
+      customer:profiles!orders_customer_id_fkey(id, nickname),
+      executor:profiles!orders_executor_id_fkey(id, nickname),
+      conversations(id)
+    `)
+    .eq('requires_contact_exchange', true)
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (status) q = q.eq('status', status);
+
+  const { data: orders, error } = await q;
+  if (error) return serverError(res, error);
+
+  if (!orders?.length) return res.json([]);
+
+  // Attach flagged message counts per conversation
+  const convIds = orders.flatMap(o => (o.conversations ?? []).map(c => c.id));
+  let flagCounts = {};
+  if (convIds.length) {
+    const { data: flags } = await supabase
+      .from('messages')
+      .select('conversation_id')
+      .in('conversation_id', convIds)
+      .eq('is_contact_info', true);
+    for (const f of (flags ?? [])) {
+      flagCounts[f.conversation_id] = (flagCounts[f.conversation_id] ?? 0) + 1;
+    }
+  }
+
+  res.json(orders.map(o => {
+    const convId = o.conversations?.[0]?.id ?? null;
+    return {
+      ...o,
+      conversation_id: convId,
+      flagged_messages: convId ? (flagCounts[convId] ?? 0) : 0,
+      conversations: undefined,
+    };
+  }));
+});
+
+// ─── Support tickets (admin) ─────────────────────────────────
+
+// PATCH /admin/support/tickets/:id/close
+router.patch('/support/tickets/:id/close', async (req, res) => {
+  const { error } = await supabase
+    .from('support_tickets')
+    .update({ status: 'closed' })
+    .eq('id', req.params.id)
+    .neq('status', 'closed');
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
+// ─── Chat moderation ────────────────────────────────────────
+
+// GET /admin/chat-moderation?reviewed=false|true
+router.get('/chat-moderation', async (req, res) => {
+  const { reviewed } = req.query;
+
+  let q = supabase
+    .from('messages')
+    .select(`
+      id, content, is_contact_info, ai_suspected, moderation_reviewed, created_at,
+      sender:profiles!messages_sender_id_fkey(id, nickname),
+      conversations!inner(id, order_id, orders!inner(id, title, order_type))
+    `)
+    .or('is_contact_info.eq.true,ai_suspected.eq.true')
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (reviewed === 'false') q = q.eq('moderation_reviewed', false);
+  else if (reviewed === 'true') q = q.eq('moderation_reviewed', true);
+
+  const { data, error } = await q;
+  if (error) return serverError(res, error);
+
+  res.json((data ?? []).map(m => ({
+    ...m,
+    flag_source: m.is_contact_info ? 'regex' : 'ai',
+  })));
+});
+
+// PATCH /admin/chat-moderation/:msgId/review
+router.patch('/chat-moderation/:msgId/review', async (req, res) => {
+  const { error } = await supabase
+    .from('messages')
+    .update({ moderation_reviewed: true })
+    .eq('id', req.params.msgId);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
+// ─── Stats ──────────────────────────────────────────────────
+
+// GET /admin/stats
+router.get('/stats', async (req, res) => {
+  const [
+    totalUsersRes,
+    bannedUsersRes,
+    ordersRawRes,
+    completedRes,
+    openDisputesRes,
+    openTicketsRes,
+    pendingTxRes,
+    confirmedDepositsRes,
+  ] = await Promise.all([
+    supabase.from('profiles').select('id', { count: 'exact', head: true }),
+    supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('is_banned', true),
+    supabase.from('orders').select('status'),
+    supabase.from('orders').select('final_amount, base_amount').eq('status', 'completed'),
+    supabase.from('disputes').select('id', { count: 'exact', head: true }).eq('status', 'open'),
+    supabase.from('support_tickets').select('id', { count: 'exact', head: true }).in('status', ['open', 'answered']),
+    supabase.from('transactions').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+    // Platform revenue = 10% commission retained on confirmed deposits
+    supabase.from('deposit_requests').select('confirmed_amount, credited_amount').eq('status', 'confirmed'),
+  ]);
+
+  const orders_by_status = {};
+  for (const o of (ordersRawRes.data ?? [])) {
+    orders_by_status[o.status] = (orders_by_status[o.status] ?? 0) + 1;
+  }
+
+  const completed = completedRes.data ?? [];
+  // Real platform earnings: difference between what users paid in and what was credited.
+  const total_commission_earned = Math.round(
+    (confirmedDepositsRes.data ?? []).reduce(
+      (s, d) => s + (parseFloat(d.confirmed_amount ?? 0) - parseFloat(d.credited_amount ?? 0)), 0
+    ) * 100
+  ) / 100;
+  const total_volume = Math.round(
+    completed.reduce((s, o) => s + parseFloat(o.final_amount ?? o.base_amount ?? 0), 0) * 100
+  ) / 100;
+
+  res.json({
+    total_users:               totalUsersRes.count ?? 0,
+    banned_users:              bannedUsersRes.count ?? 0,
+    orders_by_status,
+    total_commission_earned,
+    total_volume,
+    open_disputes_count:       openDisputesRes.count ?? 0,
+    open_support_tickets_count: openTicketsRes.count ?? 0,
+    pending_transactions_count: pendingTxRes.count ?? 0,
+  });
+});
+
+// ─── Users ──────────────────────────────────────────────────
+
+// GET /admin/users?search=&filter=all|banned|admins
+router.get('/users', async (req, res) => {
+  const { search, filter } = req.query;
+
+  // Fetch auth users for emails via service-role admin API
+  const { data: { users: authUsers }, error: authErr } = await supabase.auth.admin.listUsers({ perPage: 1000 });
+  if (authErr) return serverError(res, authErr);
+
+  const emailMap = {};
+  for (const u of (authUsers ?? [])) emailMap[u.id] = u.email ?? null;
+
+  let q = supabase
+    .from('profiles')
+    .select('id, nickname, is_admin, is_banned, rating_as_customer, rating_as_executor, reviews_count_customer, reviews_count_executor, balance, created_at')
+    .order('created_at', { ascending: false });
+
+  if (filter === 'banned') q = q.eq('is_banned', true);
+  else if (filter === 'admins') q = q.eq('is_admin', true);
+
+  const { data: profiles, error } = await q;
+  if (error) return serverError(res, error);
+
+  let result = (profiles ?? []).map(p => ({ ...p, email: emailMap[p.id] ?? null }));
+
+  if (search?.trim()) {
+    const s = search.trim().toLowerCase();
+    result = result.filter(p =>
+      p.nickname?.toLowerCase().includes(s) || p.email?.toLowerCase().includes(s)
+    );
+  }
+
+  res.json(result);
+});
+
+// PATCH /admin/users/:id — ban/unban or grant/revoke admin
+router.patch('/users/:id', async (req, res) => {
+  const { id } = req.params;
+  const { is_banned, is_admin } = req.body;
+
+  // Prevent removing the last admin
+  if (is_admin === false) {
+    const { count } = await supabase
+      .from('profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_admin', true)
+      .neq('id', id);
+    if ((count ?? 0) === 0) {
+      return res.status(400).json({ error: 'Должен остаться хотя бы один администратор' });
+    }
+  }
+
+  const updates = {};
+  if (is_banned !== undefined) updates.is_banned = is_banned;
+  if (is_admin  !== undefined) updates.is_admin  = is_admin;
+
+  if (Object.keys(updates).length === 0)
+    return res.status(400).json({ error: 'No fields to update' });
+
+  const { error } = await supabase.from('profiles').update(updates).eq('id', id);
+  if (error) return serverError(res, error);
+
+  res.json({ success: true });
+});
+
+// ─── Deposits ───────────────────────────────────────────────
+
+// GET /admin/deposits?status=pending
+router.get('/deposits', async (req, res) => {
+  const { status } = req.query;
+  let q = supabase
+    .from('deposit_requests')
+    .select('id, claimed_amount, confirmed_amount, credited_amount, status, admin_comment, created_at, user:profiles!deposit_requests_user_id_fkey(id, nickname)')
+    .order('created_at', { ascending: false });
+  if (status) q = q.eq('status', status);
+  const { data, error } = await q;
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/deposits/:id/confirm
+router.post('/deposits/:id/confirm', async (req, res) => {
+  const { data: dep } = await supabase
+    .from('deposit_requests')
+    .select('id, status, user_id, claimed_amount')
+    .eq('id', req.params.id)
+    .single();
+
+  if (!dep) return res.status(404).json({ error: 'Заявка не найдена' });
+  if (dep.status !== 'pending') return res.status(400).json({ error: 'Заявка уже обработана' });
+
+  const confirmedAmount = req.body.confirmed_amount != null
+    ? parseFloat(req.body.confirmed_amount)
+    : parseFloat(dep.claimed_amount);
+  if (!confirmedAmount || confirmedAmount <= 0 || isNaN(confirmedAmount))
+    return res.status(400).json({ error: 'Некорректная сумма подтверждения' });
+
+  const creditedAmount = Math.round(confirmedAmount * 0.9 * 100) / 100;
+  const now = new Date().toISOString();
+
+  const { data: claimed, error: claimErr } = await supabase
+    .from('deposit_requests')
+    .update({ status: 'confirmed', confirmed_amount: confirmedAmount, credited_amount: creditedAmount, processed_by: req.userId, processed_at: now })
+    .eq('id', req.params.id)
+    .eq('status', 'pending')
+    .select('id');
+  if (claimErr) return serverError(res, claimErr, 'deposit:confirm:claim');
+  if (!claimed || claimed.length === 0)
+    return res.status(409).json({ error: 'Заявка уже обработана' });
+
+  await supabase.rpc('add_wallet_balance', { p_user_id: dep.user_id, p_amount: creditedAmount });
+  await supabase.from('profiles').update({ last_deposit_confirmed_at: now }).eq('id', dep.user_id);
+  await supabase.from('transactions').insert({ user_id: dep.user_id, type: 'deposit', amount: creditedAmount, status: 'completed' });
+
+  res.json({ success: true, credited_amount: creditedAmount });
+});
+
+// POST /admin/deposits/:id/reject
+router.post('/deposits/:id/reject', async (req, res) => {
+  const { admin_comment } = req.body;
+  const { data: claimed, error } = await supabase
+    .from('deposit_requests')
+    .update({ status: 'rejected', admin_comment: admin_comment ?? null, processed_by: req.userId, processed_at: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .eq('status', 'pending')
+    .select('id');
+  if (error) return serverError(res, error);
+  if (!claimed || claimed.length === 0)
+    return res.status(409).json({ error: 'Заявка уже обработана' });
+  res.json({ success: true });
+});
+
+// ─── Withdrawals ─────────────────────────────────────────────
+
+// GET /admin/withdrawals?status=pending
+router.get('/withdrawals', async (req, res) => {
+  const { status } = req.query;
+  let q = supabase
+    .from('withdrawal_requests')
+    .select('id, amount, card_number, status, admin_comment, created_at, user:profiles!withdrawal_requests_user_id_fkey(id, nickname)')
+    .order('created_at', { ascending: false });
+  if (status) q = q.eq('status', status);
+  const { data, error } = await q;
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/withdrawals/:id/confirm
+router.post('/withdrawals/:id/confirm', async (req, res) => {
+  const { data: wr } = await supabase
+    .from('withdrawal_requests')
+    .select('id, status, user_id, amount')
+    .eq('id', req.params.id)
+    .single();
+
+  if (!wr) return res.status(404).json({ error: 'Заявка не найдена' });
+
+  const { data: claimed, error } = await supabase
+    .from('withdrawal_requests')
+    .update({ status: 'confirmed', processed_by: req.userId, processed_at: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .eq('status', 'pending')
+    .select('id');
+  if (error) return serverError(res, error);
+  if (!claimed || claimed.length === 0)
+    return res.status(409).json({ error: 'Заявка уже обработана' });
+
+  // Balance was already deducted at withdrawal creation
+  await supabase.from('transactions').insert({ user_id: wr.user_id, type: 'withdrawal', amount: parseFloat(wr.amount), status: 'completed' });
+
+  res.json({ success: true });
+});
+
+// POST /admin/withdrawals/:id/reject
+router.post('/withdrawals/:id/reject', async (req, res) => {
+  const { admin_comment } = req.body;
+
+  const { data: wr } = await supabase
+    .from('withdrawal_requests')
+    .select('id, status, user_id, amount')
+    .eq('id', req.params.id)
+    .single();
+
+  if (!wr) return res.status(404).json({ error: 'Заявка не найдена' });
+
+  const { data: claimed, error } = await supabase
+    .from('withdrawal_requests')
+    .update({ status: 'rejected', admin_comment: admin_comment ?? null, processed_by: req.userId, processed_at: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .eq('status', 'pending')
+    .select('id');
+  if (error) return serverError(res, error);
+  if (!claimed || claimed.length === 0)
+    return res.status(409).json({ error: 'Заявка уже обработана' });
+
+  // Refund the reserved balance
+  await supabase.rpc('add_wallet_balance', { p_user_id: wr.user_id, p_amount: parseFloat(wr.amount) });
+
+  res.json({ success: true });
+});
+
+// ─── All orders (admin overview) ────────────────────────────
+
+// GET /admin/orders?status=&order_type=&search=&page=1&limit=50
+router.get('/orders', async (req, res) => {
+  const { status, order_type, search, page = 1, limit = 50 } = req.query;
+  const pg  = Math.max(1, parseInt(page)  || 1);
+  const lim = Math.min(100, Math.max(1, parseInt(limit) || 50));
+  const offset = (pg - 1) * lim;
+
+  // Resolve search term to matching user IDs for nickname filter
+  let userIdFilter = [];
+  if (search?.trim()) {
+    const { data: profiles } = await supabase
+      .from('profiles').select('id').ilike('nickname', `%${search.trim()}%`).limit(100);
+    userIdFilter = (profiles ?? []).map(p => p.id);
+  }
+
+  let q = supabase
+    .from('orders')
+    .select(`
+      id, title, order_type, status, base_amount, final_amount, reserved_amount,
+      deposit_amount, requires_contact_exchange, created_at, updated_at,
+      customer:profiles!orders_customer_id_fkey(id, nickname),
+      executor:profiles!orders_executor_id_fkey(id, nickname)
+    `, { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + lim - 1);
+
+  if (status)     q = q.eq('status', status);
+  if (order_type) q = q.eq('order_type', order_type);
+
+  if (search?.trim()) {
+    const s = search.trim();
+    const orParts = [`title.ilike.%${s}%`, `description.ilike.%${s}%`];
+    if (userIdFilter.length) {
+      const ids = userIdFilter.join(',');
+      orParts.push(`customer_id.in.(${ids})`, `executor_id.in.(${ids})`);
+    }
+    q = q.or(orParts.join(','));
+  }
+
+  const { data, error, count } = await q;
+  if (error) return serverError(res, error);
+  res.json({ orders: data ?? [], total: count ?? 0, page: pg, limit: lim });
+});
+
+// ─── All conversations (admin overview) ──────────────────────
+
+// GET /admin/conversations?search=&type=&page=1&limit=50
+router.get('/conversations', async (req, res) => {
+  const { search, type, page = 1, limit = 50 } = req.query;
+  const pg  = Math.max(1, parseInt(page)  || 1);
+  const lim = Math.min(100, Math.max(1, parseInt(limit) || 50));
+  const offset = (pg - 1) * lim;
+
+  // Resolve search to conv IDs via profiles / orders / tickets
+  let searchConvIds = null; // null = no filter; [] = empty result
+  if (search?.trim()) {
+    const s = search.trim();
+    const [profilesRes, ordersRes, ticketsRes] = await Promise.all([
+      supabase.from('profiles').select('id').ilike('nickname', `%${s}%`).limit(100),
+      supabase.from('orders').select('id').ilike('title', `%${s}%`).limit(100),
+      supabase.from('support_tickets').select('id').ilike('subject', `%${s}%`).limit(100),
+    ]);
+
+    const ids = new Set();
+
+    const userIds = (profilesRes.data ?? []).map(p => p.id);
+    if (userIds.length) {
+      const { data: cp } = await supabase
+        .from('conversation_participants').select('conversation_id').in('user_id', userIds);
+      (cp ?? []).forEach(c => ids.add(c.conversation_id));
+    }
+
+    const orderIds = (ordersRes.data ?? []).map(o => o.id);
+    if (orderIds.length) {
+      const { data: oc } = await supabase
+        .from('conversations').select('id').in('order_id', orderIds);
+      (oc ?? []).forEach(c => ids.add(c.id));
+    }
+
+    const ticketIds = (ticketsRes.data ?? []).map(t => t.id);
+    if (ticketIds.length) {
+      const { data: tc } = await supabase
+        .from('conversations').select('id').in('support_ticket_id', ticketIds);
+      (tc ?? []).forEach(c => ids.add(c.id));
+    }
+
+    searchConvIds = [...ids];
+  }
+
+  // If search returned no matches → return empty immediately
+  if (searchConvIds !== null && searchConvIds.length === 0)
+    return res.json({ conversations: [], total: 0, page: pg, limit: lim });
+
+  let q = supabase
+    .from('conversations')
+    .select(`
+      id, type, created_at, order_id, support_ticket_id,
+      orders!conversations_order_id_fkey(id, title),
+      support_tickets!conversations_support_ticket_id_fkey(id, subject),
+      conversation_participants(user_id, profiles!conversation_participants_user_id_fkey(id, nickname))
+    `, { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + lim - 1);
+
+  if (type) q = q.eq('type', type);
+  if (searchConvIds !== null) q = q.in('id', searchConvIds);
+
+  const { data: convs, error, count } = await q;
+  if (error) return serverError(res, error);
+
+  const convIds = (convs ?? []).map(c => c.id);
+  let lastMessages = {};
+  let msgCounts   = {};
+
+  if (convIds.length) {
+    // Fetch recent messages for last-message preview and per-conv count
+    const { data: msgs } = await supabase
+      .from('messages')
+      .select('conversation_id, content, created_at, sender:profiles!messages_sender_id_fkey(nickname)')
+      .in('conversation_id', convIds)
+      .order('created_at', { ascending: false })
+      .limit(Math.min(convIds.length * 20, 1000));
+
+    for (const m of (msgs ?? [])) {
+      msgCounts[m.conversation_id] = (msgCounts[m.conversation_id] ?? 0) + 1;
+      if (!lastMessages[m.conversation_id]) lastMessages[m.conversation_id] = m;
+    }
+  }
+
+  const result = (convs ?? []).map(c => ({
+    id:                 c.id,
+    type:               c.type,
+    created_at:         c.created_at,
+    order_id:           c.order_id,
+    support_ticket_id:  c.support_ticket_id,
+    order_title:        c.orders?.title ?? null,
+    ticket_subject:     c.support_tickets?.subject ?? null,
+    participants:       (c.conversation_participants ?? []).map(p => p.profiles ?? { id: p.user_id, nickname: '?' }),
+    last_message:       lastMessages[c.id]
+      ? { content: lastMessages[c.id].content, created_at: lastMessages[c.id].created_at, sender_nickname: lastMessages[c.id].sender?.nickname ?? 'Система' }
+      : null,
+    message_count: msgCounts[c.id] ?? 0,
+  }));
+
+  // Re-sort by last message time (newer message = higher in list)
+  result.sort((a, b) =>
+    new Date(b.last_message?.created_at ?? b.created_at) -
+    new Date(a.last_message?.created_at ?? a.created_at)
+  );
+
+  res.json({ conversations: result, total: count ?? 0, page: pg, limit: lim });
+});
+
+// ─── Settings ───────────────────────────────────────────────
+
+// PUT /admin/settings/:key
+router.put('/settings/:key', async (req, res) => {
+  const { key } = req.params;
+  const { value } = req.body;
+
+  if (value == null) return res.status(400).json({ error: 'value is required' });
+
+  const { data, error } = await supabase
+    .from('site_settings')
+    .upsert(
+      { key, value, updated_by: req.userId, updated_at: new Date().toISOString() },
+      { onConflict: 'key' }
+    )
+    .select()
+    .single();
+
+  if (error) return serverError(res, error);
+  res.json(data);
+});
+
+module.exports = router;

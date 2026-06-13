@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: studbirga-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: frankfurt
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: AUTO_CONFIRM_HOURS
+        value: "24"
+      - key: DEEPSEEK_API_KEY
+        sync: false
