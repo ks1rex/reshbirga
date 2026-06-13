@@ -111,6 +111,12 @@ export default function Navbar() {
             </NavLink>
           ))}
 
+          {profile && (
+            <NavLink to="/wallet" style={({ isActive }) => S.mobileLink(isActive)}>
+              <Wallet size={17} /> Кошелёк: {formatCurrency(profile.balance ?? 0)}
+            </NavLink>
+          )}
+
           <div style={S.mobileDivider} />
 
           {/* Mode toggle */}
