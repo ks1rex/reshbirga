@@ -5,4 +5,5 @@ export default defineConfig({
   plugins: [react()],
   base: '/reshbirga/',
   server: { port: 5173 },
+  build: { sourcemap: false },
 });
