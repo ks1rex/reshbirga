@@ -13,8 +13,16 @@ const listingsRouter       = require('./routes/listings');
 
 const app = express();
 
+const allowedOrigins = (process.env.FRONTEND_URL || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: allowedOrigins.length
+    ? (origin, cb) => {
+        if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+        cb(new Error('Not allowed by CORS'));
+      }
+    : '*',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
