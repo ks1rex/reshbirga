@@ -131,6 +131,13 @@ export default function Wallet() {
 
   const balance = data?.balance ?? 0;
 
+  // Build the referral link client-side from the app's own base path so it always
+  // points at the real route (the app is served under BASE_URL, e.g. /reshbirga/);
+  // the backend's referral_link omits that prefix. Fall back to the API value.
+  const referralLink = data?.referral_code
+    ? `${window.location.origin}${import.meta.env.BASE_URL}register?ref=${data.referral_code}`
+    : (data?.referral_link ?? null);
+
   return (
     <div style={{ maxWidth: 680 }}>
       <div style={S.h1}>Кошелёк</div>
@@ -249,7 +256,7 @@ export default function Wallet() {
       </div>
 
       {/* ─── Referral ─── */}
-      {data?.referral_link && (
+      {referralLink && (
         <div style={S.card}>
           <div style={S.sectionTitle}><Users size={18} color="#14a89a" />Реферальная программа</div>
           <div style={S.note}>
@@ -260,13 +267,13 @@ export default function Wallet() {
             <input
               style={{ ...S.input, marginBottom: 0, flex: 1 }}
               readOnly
-              value={data.referral_link}
+              value={referralLink}
               onFocus={e => e.target.select()}
             />
             <button
               style={{ ...S.btn, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}
               onClick={() => {
-                navigator.clipboard.writeText(data.referral_link);
+                navigator.clipboard.writeText(referralLink);
                 setCopied(true);
                 setTimeout(() => setCopied(false), 2000);
               }}
