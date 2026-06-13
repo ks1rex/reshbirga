@@ -55,12 +55,26 @@ export default function AdminDeposits() {
 
   useEffect(() => { if (profile?.is_admin) load(); }, [profile, filter]);
 
+  function calcBreakdown(dep) {
+    const confirmed = parseFloat(confirmedAmts[dep.id]) || 0;
+    const credited  = Math.round(confirmed * 0.9 * 100) / 100;
+    const isRef     = dep.has_referrer && (dep.referral_qualifying_deposits_count < 3) && confirmed >= 100;
+    const commPct   = isRef ? 5 : 10;
+    const commAmt   = Math.round(confirmed * (commPct / 100) * 100) / 100;
+    const bonus     = isRef ? Math.round(confirmed * 0.05 * 100) / 100 : 0;
+    return { confirmed, credited, isRef, commPct, commAmt, bonus };
+  }
+
   async function handleConfirm(dep) {
     setActing(a => ({ ...a, [dep.id]: true }));
     try {
       const confirmed_amount = parseFloat(confirmedAmts[dep.id]);
       const result = await apiCall('POST', `/admin/deposits/${dep.id}/confirm`, { confirmed_amount });
-      toast.success(`Зачислено ${formatCurrency(result.credited_amount)} (−10% комиссия)`);
+      const bonus = result.referral_bonus ?? 0;
+      const msg = bonus > 0
+        ? `Зачислено ${formatCurrency(result.credited_amount)} · Реф. бонус ${formatCurrency(bonus)} → ${dep.referrer_nickname}`
+        : `Зачислено ${formatCurrency(result.credited_amount)} (−10% комиссия)`;
+      toast.success(msg);
       load();
     } catch (e) { toast.error(e.message); }
     finally { setActing(a => ({ ...a, [dep.id]: false })); }
@@ -113,11 +127,13 @@ export default function AdminDeposits() {
               <div style={{ color: '#64748b', fontSize: '0.8rem', marginTop: 6 }}>Комментарий: {dep.admin_comment}</div>
             )}
 
-            {dep.status === 'pending' && (
+            {dep.status === 'pending' && (() => {
+              const bd = calcBreakdown(dep);
+              return (
               <>
                 <div style={S.actions}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{ color: '#94a3b8', fontSize: '0.83rem' }}>Подтверждённая сумма:</span>
+                    <span style={{ color: '#94a3b8', fontSize: '0.83rem' }}>Переведено:</span>
                     <input
                       style={S.confirmedInput}
                       type="number"
@@ -126,6 +142,7 @@ export default function AdminDeposits() {
                       value={confirmedAmts[dep.id] ?? ''}
                       onChange={e => setConfirmedAmts(a => ({ ...a, [dep.id]: e.target.value }))}
                     />
+                    <span style={{ color: '#64748b', fontSize: '0.83rem' }}>₽</span>
                   </div>
                   <button style={S.confirmBtn} onClick={() => handleConfirm(dep)} disabled={acting[dep.id]}>
                     <CheckCircle size={14} />{acting[dep.id] ? '...' : 'Подтвердить'}
@@ -134,6 +151,24 @@ export default function AdminDeposits() {
                     <XCircle size={14} />Отклонить
                   </button>
                 </div>
+
+                {bd.confirmed > 0 && (
+                  <div style={{ marginTop: 8, padding: '8px 12px', background: '#0a1420', borderRadius: 8, fontSize: '0.82rem', display: 'flex', flexDirection: 'column', gap: 3 }}>
+                    <div style={{ color: '#94a3b8' }}>
+                      Поступит пользователю: <strong style={{ color: '#14a89a' }}>{formatCurrency(bd.credited)}</strong>
+                    </div>
+                    <div style={{ color: bd.isRef ? '#f59e0b' : '#94a3b8' }}>
+                      Комиссия сайта: <strong>{bd.commPct}%</strong> ({formatCurrency(bd.commAmt)})
+                    </div>
+                    {bd.isRef && (
+                      <div style={{ color: '#f59e0b' }}>
+                        Из них 5% ({formatCurrency(bd.bonus)}) — реферальный бонус пользователю{' '}
+                        <strong>{dep.referrer_nickname}</strong>{' '}
+                        (пополнение {dep.referral_qualifying_deposits_count + 1} из 3)
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {rejectOpen[dep.id] && (
                   <div style={{ marginTop: 8 }}>
@@ -150,7 +185,8 @@ export default function AdminDeposits() {
                   </div>
                 )}
               </>
-            )}
+          );
+        })()}
           </div>
         ))
       )}

@@ -1,4 +1,5 @@
-import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet, useSearchParams } from 'react-router-dom';
+import { useEffect } from 'react';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ToastProvider } from './components/Toast';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -37,6 +38,16 @@ import Wallet from './pages/Wallet';
 import UserProfile from './pages/UserProfile';
 import NotFound from './pages/NotFound';
 
+// Captures ?ref=CODE from any page and stores it in localStorage for use on /register
+function RefCapture() {
+  const [params] = useSearchParams();
+  useEffect(() => {
+    const ref = params.get('ref');
+    if (ref) localStorage.setItem('ref_code', ref);
+  }, [params]);
+  return null;
+}
+
 function AdminGuard() {
   const { user, profile, loading } = useAuth();
   if (loading) return null;
@@ -50,6 +61,7 @@ export default function App() {
     <ErrorBoundary>
       <AuthProvider>
         <ToastProvider>
+          <RefCapture />
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/register" element={<Register />} />

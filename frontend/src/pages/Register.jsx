@@ -30,9 +30,16 @@ export default function Register() {
     if (password !== confirm) return setError('Пароли не совпадают');
     if (password.length < 8) return setError('Пароль должен быть не менее 8 символов');
     setLoading(true);
-    const { error: err } = await supabase.auth.signUp({ email, password });
-    if (err) setError(err.message);
-    else setSuccess(true);
+
+    const refCode = localStorage.getItem('ref_code');
+    const options = refCode ? { data: { ref_code: refCode } } : {};
+    const { error: err } = await supabase.auth.signUp({ email, password, options });
+    if (err) {
+      setError(err.message);
+    } else {
+      if (refCode) localStorage.removeItem('ref_code');
+      setSuccess(true);
+    }
     setLoading(false);
   }
 

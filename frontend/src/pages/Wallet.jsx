@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Wallet as WalletIcon, ArrowDownCircle, ArrowUpCircle, Clock } from 'lucide-react';
+import { Wallet as WalletIcon, ArrowDownCircle, ArrowUpCircle, Clock, Users, Copy, Check } from 'lucide-react';
 import { apiCall } from '../utils/api';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../components/Toast';
@@ -60,6 +60,9 @@ export default function Wallet() {
   const [wdCard, setWdCard]       = useState('');
   const [wdLoading, setWdLoading] = useState(false);
   const [wdError, setWdError]     = useState('');
+
+  // Referral copy state
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => { load(); }, []);
 
@@ -244,6 +247,47 @@ export default function Wallet() {
           </div>
         )}
       </div>
+
+      {/* ─── Referral ─── */}
+      {data?.referral_link && (
+        <div style={S.card}>
+          <div style={S.sectionTitle}><Users size={18} color="#14a89a" />Реферальная программа</div>
+          <div style={S.note}>
+            За первые 3 пополнения (от&nbsp;100&nbsp;₽) каждого приглашённого вам начисляется <strong style={{ color: '#e2e8f0' }}>5%&nbsp;от суммы перевода</strong>.
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, marginBottom: '1rem' }}>
+            <input
+              style={{ ...S.input, marginBottom: 0, flex: 1 }}
+              readOnly
+              value={data.referral_link}
+              onFocus={e => e.target.select()}
+            />
+            <button
+              style={{ ...S.btn, padding: '10px 16px', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}
+              onClick={() => {
+                navigator.clipboard.writeText(data.referral_link);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              }}
+            >
+              {copied ? <Check size={15} /> : <Copy size={15} />}
+              {copied ? 'Скопировано' : 'Скопировать'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ color: '#64748b', fontSize: '0.78rem', marginBottom: 2 }}>Заработано по рефералам</div>
+              <div style={{ color: '#14a89a', fontWeight: 700, fontSize: '1.1rem' }}>{formatCurrency(data.referral_earnings ?? 0)}</div>
+            </div>
+            <div>
+              <div style={{ color: '#64748b', fontSize: '0.78rem', marginBottom: 2 }}>Зарегистрировано по вашей ссылке</div>
+              <div style={{ color: '#e2e8f0', fontWeight: 700, fontSize: '1.1rem' }}>{data.referral_registered_count ?? 0}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div style={S.timer}>
         <Clock size={14} />

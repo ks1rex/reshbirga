@@ -7,10 +7,12 @@ const { serverError } = require('../utils/httpError');
 const router = Router();
 router.use(auth);
 
-// GET /wallet — balance + last 5 of each request type
+// GET /wallet — balance + last 5 of each request type + referral info
 router.get('/', async (req, res) => {
   const [profileRes, depositsRes, withdrawalsRes] = await Promise.all([
-    supabase.from('profiles').select('balance').eq('id', req.userId).single(),
+    supabase.from('profiles')
+      .select('balance, referral_code, referral_earnings, referral_registered_count')
+      .eq('id', req.userId).single(),
     supabase.from('deposit_requests')
       .select('id, claimed_amount, confirmed_amount, credited_amount, status, admin_comment, created_at')
       .eq('user_id', req.userId)
@@ -24,8 +26,17 @@ router.get('/', async (req, res) => {
   ]);
 
   if (profileRes.error) return serverError(res, profileRes.error);
+
+  const prof = profileRes.data;
+  const frontendBase = (process.env.FRONTEND_URL || '').split(',')[0].trim();
+  const referralCode = prof?.referral_code ?? null;
+
   res.json({
-    balance: parseFloat(profileRes.data?.balance ?? 0),
+    balance: parseFloat(prof?.balance ?? 0),
+    referral_code: referralCode,
+    referral_link: referralCode ? `${frontendBase}/register?ref=${referralCode}` : null,
+    referral_earnings: parseFloat(prof?.referral_earnings ?? 0),
+    referral_registered_count: prof?.referral_registered_count ?? 0,
     recent_deposits: depositsRes.data ?? [],
     recent_withdrawals: withdrawalsRes.data ?? [],
   });

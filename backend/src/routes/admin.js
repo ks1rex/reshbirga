@@ -360,12 +360,30 @@ router.get('/deposits', async (req, res) => {
   const { status } = req.query;
   let q = supabase
     .from('deposit_requests')
-    .select('id, claimed_amount, confirmed_amount, credited_amount, status, admin_comment, created_at, user:profiles!deposit_requests_user_id_fkey(id, nickname)')
+    .select(`id, claimed_amount, confirmed_amount, credited_amount, status, admin_comment, created_at,
+      referral_bonus_applied, referral_bonus_amount,
+      user:profiles!deposit_requests_user_id_fkey(
+        id, nickname, referred_by, referral_qualifying_deposits_count,
+        referrer:profiles!profiles_referred_by_fkey(id, nickname)
+      )`)
     .order('created_at', { ascending: false });
   if (status) q = q.eq('status', status);
   const { data, error } = await q;
   if (error) return serverError(res, error);
-  res.json(data ?? []);
+
+  // Flatten referral info for the frontend
+  const result = (data ?? []).map(dep => ({
+    ...dep,
+    user: dep.user ? {
+      id:       dep.user.id,
+      nickname: dep.user.nickname,
+    } : null,
+    has_referrer:                     dep.user?.referred_by != null,
+    referral_qualifying_deposits_count: dep.user?.referral_qualifying_deposits_count ?? 0,
+    referrer_nickname:                dep.user?.referrer?.nickname ?? null,
+  }));
+
+  res.json(result);
 });
 
 // POST /admin/deposits/:id/confirm
@@ -385,12 +403,33 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   if (!confirmedAmount || confirmedAmount <= 0 || isNaN(confirmedAmount))
     return res.status(400).json({ error: 'Некорректная сумма подтверждения' });
 
+  // credited_amount always = 90% — this is what the user receives, unchanged
   const creditedAmount = Math.round(confirmedAmount * 0.9 * 100) / 100;
   const now = new Date().toISOString();
 
+  // Fetch referral info for the depositing user
+  const { data: userProfile } = await supabase
+    .from('profiles')
+    .select('referred_by, referral_qualifying_deposits_count')
+    .eq('id', dep.user_id)
+    .single();
+
+  const referrerId = userProfile?.referred_by ?? null;
+  const qualifyingCount = userProfile?.referral_qualifying_deposits_count ?? 0;
+  const referralEligible = referrerId != null && qualifyingCount < 3 && confirmedAmount >= 100;
+  const referralBonus = referralEligible ? Math.round(confirmedAmount * 0.05 * 100) / 100 : 0;
+
+  // Atomic claim — prevents double-processing
   const { data: claimed, error: claimErr } = await supabase
     .from('deposit_requests')
-    .update({ status: 'confirmed', confirmed_amount: confirmedAmount, credited_amount: creditedAmount, processed_by: req.userId, processed_at: now })
+    .update({
+      status: 'confirmed',
+      confirmed_amount: confirmedAmount,
+      credited_amount: creditedAmount,
+      processed_by: req.userId,
+      processed_at: now,
+      ...(referralEligible ? { referral_bonus_applied: true, referral_bonus_amount: referralBonus } : {}),
+    })
     .eq('id', req.params.id)
     .eq('status', 'pending')
     .select('id');
@@ -398,11 +437,27 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   if (!claimed || claimed.length === 0)
     return res.status(409).json({ error: 'Заявка уже обработана' });
 
+  // Credit depositor
   await supabase.rpc('add_wallet_balance', { p_user_id: dep.user_id, p_amount: creditedAmount });
   await supabase.from('profiles').update({ last_deposit_confirmed_at: now }).eq('id', dep.user_id);
   await supabase.from('transactions').insert({ user_id: dep.user_id, type: 'deposit', amount: creditedAmount, status: 'completed' });
 
-  res.json({ success: true, credited_amount: creditedAmount });
+  // Referral bonus — 5% of confirmed_amount to referrer (out of the platform's 10%)
+  if (referralEligible) {
+    await supabase.rpc('add_wallet_balance', { p_user_id: referrerId, p_amount: referralBonus });
+    await supabase.rpc('add_referral_earnings', { p_user_id: referrerId, p_amount: referralBonus });
+    await supabase.from('profiles').update({
+      referral_qualifying_deposits_count: qualifyingCount + 1,
+    }).eq('id', dep.user_id);
+    await supabase.from('transactions').insert({
+      user_id: referrerId,
+      type: 'referral_bonus',
+      amount: referralBonus,
+      status: 'completed',
+    });
+  }
+
+  res.json({ success: true, credited_amount: creditedAmount, referral_bonus: referralBonus });
 });
 
 // POST /admin/deposits/:id/reject
