@@ -363,24 +363,31 @@ router.get('/deposits', async (req, res) => {
     .select(`id, claimed_amount, confirmed_amount, credited_amount, status, admin_comment, created_at,
       referral_bonus_applied, referral_bonus_amount,
       user:profiles!deposit_requests_user_id_fkey(
-        id, nickname, referred_by, referral_qualifying_deposits_count,
-        referrer:profiles!profiles_referred_by_fkey(id, nickname)
+        id, nickname, referred_by, referral_qualifying_deposits_count
       )`)
     .order('created_at', { ascending: false });
   if (status) q = q.eq('status', status);
   const { data, error } = await q;
   if (error) return serverError(res, error);
 
-  // Flatten referral info for the frontend
+  // PostgREST doesn't support self-referential nested embeds, so we resolve
+  // referrer nicknames with a separate query.
+  const referrerIds = [...new Set((data ?? []).map(d => d.user?.referred_by).filter(Boolean))];
+  const referrerMap = {};
+  if (referrerIds.length > 0) {
+    const { data: referrers } = await supabase
+      .from('profiles')
+      .select('id, nickname')
+      .in('id', referrerIds);
+    for (const r of (referrers ?? [])) referrerMap[r.id] = r.nickname;
+  }
+
   const result = (data ?? []).map(dep => ({
     ...dep,
-    user: dep.user ? {
-      id:       dep.user.id,
-      nickname: dep.user.nickname,
-    } : null,
-    has_referrer:                     dep.user?.referred_by != null,
+    user: dep.user ? { id: dep.user.id, nickname: dep.user.nickname } : null,
+    has_referrer:                       dep.user?.referred_by != null,
     referral_qualifying_deposits_count: dep.user?.referral_qualifying_deposits_count ?? 0,
-    referrer_nickname:                dep.user?.referrer?.nickname ?? null,
+    referrer_nickname:                  dep.user?.referred_by ? (referrerMap[dep.user.referred_by] ?? null) : null,
   }));
 
   res.json(result);
