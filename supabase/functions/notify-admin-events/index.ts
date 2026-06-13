@@ -28,16 +28,17 @@ async function sendTelegram(text: string) {
 }
 
 serve(async (req) => {
-  // Shared-secret gate: the function is publicly reachable, so without this anyone
+  const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
+
+  // Shared-secret gate: this function is publicly reachable, so without it anyone
   // who knows the URL could POST and send arbitrary Telegram messages to the admin.
-  // Configure NOTIFY_WEBHOOK_SECRET in the function's secrets and add a matching
-  // `x-webhook-secret` header in the database webhook that calls this function.
-  const expectedSecret = Deno.env.get('NOTIFY_WEBHOOK_SECRET');
-  if (!expectedSecret) {
-    console.error('[notify] NOTIFY_WEBHOOK_SECRET is not configured — refusing all requests');
-    return new Response('not configured', { status: 503 });
-  }
-  if (req.headers.get('x-webhook-secret') !== expectedSecret) {
+  // The secret lives in the service-role-only `webhook_secrets` table; the database
+  // triggers (notify_deposit_insert / notify_withdrawal_insert) send it in the
+  // `x-webhook-secret` header. Rotate by updating both that row and the triggers.
+  const { data: secretRow } = await supabase
+    .from('webhook_secrets').select('secret').eq('name', 'notify_admin_events').maybeSingle();
+  const expectedSecret = secretRow?.secret;
+  if (!expectedSecret || req.headers.get('x-webhook-secret') !== expectedSecret) {
     return new Response('unauthorized', { status: 401 });
   }
 
@@ -52,7 +53,6 @@ serve(async (req) => {
   const { table, type, record } = payload;
   if (type !== 'INSERT') return new Response('ok', { status: 200 });
 
-  const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
   let result: unknown = { sent: false, reason: 'unhandled_table' };
 
   if (table === 'deposit_requests') {
