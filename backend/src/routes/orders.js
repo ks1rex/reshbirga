@@ -8,6 +8,7 @@ const { checkAndAutoConfirm } = require('../utils/autoConfirm');
 const { runAIChatCheck }      = require('../utils/aiChatCheck');
 const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
+const { sanitizeSearchTerm } = require('../utils/search');
 
 const router = Router();
 const upload = makeUploader();
@@ -31,8 +32,8 @@ router.get('/', auth, async (req, res) => {
     .eq('status', 'open')
     .order('created_at', { ascending: false })
     .limit(100);
-  if (search?.trim()) {
-    const s = search.trim();
+  const s = sanitizeSearchTerm(search);
+  if (s) {
     q = q.or(`title.ilike.%${s}%,description.ilike.%${s}%,subject.ilike.%${s}%`);
   }
   const { data: orders, error } = await q;

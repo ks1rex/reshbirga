@@ -3,6 +3,7 @@ const auth = require('../middleware/auth');
 const adminMiddleware = require('../middleware/admin');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
+const { sanitizeSearchTerm } = require('../utils/search');
 
 const router = Router();
 router.use(auth, adminMiddleware);
@@ -519,8 +520,8 @@ router.get('/orders', async (req, res) => {
   if (status)     q = q.eq('status', status);
   if (order_type) q = q.eq('order_type', order_type);
 
-  if (search?.trim()) {
-    const s = search.trim();
+  const s = sanitizeSearchTerm(search);
+  if (s) {
     const orParts = [`title.ilike.%${s}%`, `description.ilike.%${s}%`];
     if (userIdFilter.length) {
       const ids = userIdFilter.join(',');

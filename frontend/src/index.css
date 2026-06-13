@@ -11,6 +11,12 @@ body {
   line-height: 1.5;
 }
 
+/* Form controls don't inherit the body font by default — force it so the whole
+   app uses one consistent typeface (size/colour still vary per element). */
+input, textarea, select, button {
+  font-family: inherit;
+}
+
 input:focus,
 textarea:focus {
   outline: none;

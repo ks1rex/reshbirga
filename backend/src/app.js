@@ -1,6 +1,8 @@
 const express = require('express');
 const multer = require('multer');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const healthRouter = require('./routes/health');
 const ordersRouter   = require('./routes/orders');
 const adminRouter    = require('./routes/admin');
@@ -12,6 +14,24 @@ const walletRouter         = require('./routes/wallet');
 const listingsRouter       = require('./routes/listings');
 
 const app = express();
+
+// Behind a hosting proxy (Render/Railway/etc.) — needed for correct client IPs
+// in rate limiting. Trust only the first hop.
+app.set('trust proxy', 1);
+
+// Secure HTTP headers. This is a JSON API (no server-rendered HTML), so the
+// strict-by-default CSP/embedder policies add no value and can interfere.
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+
+// Basic abuse protection: cap requests per IP. Generous enough for normal use
+// (chat polls every 5s), but stops scraping/brute-force bursts.
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много запросов. Попробуйте позже.' },
+}));
 
 const allowedOrigins = (process.env.FRONTEND_URL || '')
   .split(',').map(s => s.trim()).filter(Boolean);

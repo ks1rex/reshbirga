@@ -28,6 +28,19 @@ async function sendTelegram(text: string) {
 }
 
 serve(async (req) => {
+  // Shared-secret gate: the function is publicly reachable, so without this anyone
+  // who knows the URL could POST and send arbitrary Telegram messages to the admin.
+  // Configure NOTIFY_WEBHOOK_SECRET in the function's secrets and add a matching
+  // `x-webhook-secret` header in the database webhook that calls this function.
+  const expectedSecret = Deno.env.get('NOTIFY_WEBHOOK_SECRET');
+  if (!expectedSecret) {
+    console.error('[notify] NOTIFY_WEBHOOK_SECRET is not configured — refusing all requests');
+    return new Response('not configured', { status: 503 });
+  }
+  if (req.headers.get('x-webhook-secret') !== expectedSecret) {
+    return new Response('unauthorized', { status: 401 });
+  }
+
   const payload = await req.json().catch(() => null);
   if (!payload) return new Response('bad payload', { status: 400 });
 

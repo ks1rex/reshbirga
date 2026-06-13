@@ -10,7 +10,8 @@ const ALLOWED_EXT = new Set([
   '.xls', '.xlsx', '.csv', '.ods',
   '.ppt', '.pptx', '.odp',
   '.zip', '.rar', '.7z',
-  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.bmp', '.svg',
+  // NB: .svg is intentionally excluded — SVGs can carry inline scripts (stored XSS).
+  '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.bmp',
 ]);
 
 function fileFilter(req, file, cb) {
