@@ -70,18 +70,23 @@ function AlertCard({ label, value, sub, to, color }) {
 }
 
 export default function Admin() {
-  const [stats, setStats]   = useState(null);
+  const [stats, setStats]     = useState(null);
   const [loading, setLoading] = useState(true);
+  const [err, setErr]         = useState(null);
 
   useEffect(() => {
     apiCall('GET', '/admin/stats')
       .then(setStats)
-      .catch(() => {})
+      .catch(e => { console.error('[admin/stats]', e); setErr(e?.message ?? String(e)); })
       .finally(() => setLoading(false));
   }, []);
 
   if (loading) return <div style={{ color: '#64748b' }}>Загрузка...</div>;
-  if (!stats)  return <div style={{ color: '#f87171' }}>Ошибка загрузки статистики</div>;
+  if (!stats)  return (
+    <div style={{ color: '#f87171' }}>
+      Ошибка загрузки статистики{err ? `: ${err}` : ''}
+    </div>
+  );
 
   const statusOrder = ['open','in_progress','awaiting_confirmation','awaiting_topup','disputed','completed','cancelled'];
 
