@@ -1,7 +1,4 @@
-const { createClient } = require('@supabase/supabase-js');
-
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+const supabase = require('../supabase_client');
 
 // Validates Supabase JWT and attaches req.user + req.userId
 module.exports = async function authMiddleware(req, res, next) {
@@ -11,13 +8,7 @@ module.exports = async function authMiddleware(req, res, next) {
   }
 
   const token = authHeader.split(' ')[1];
-
-  const client = createClient(supabaseUrl, supabaseAnonKey, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-    auth: { persistSession: false },
-  });
-
-  const { data: { user }, error } = await client.auth.getUser();
+  const { data: { user }, error } = await supabase.auth.getUser(token);
 
   if (error || !user) {
     return res.status(401).json({ error: 'Invalid or expired token' });
