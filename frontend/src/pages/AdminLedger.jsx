@@ -14,6 +14,7 @@ const TX_TYPES = [
   { value: 'order_payout',           label: 'Выплата исполнителю' },
   { value: 'dispute_refund_customer', label: 'Возврат (спор)' },
   { value: 'dispute_refund_full',    label: 'Полный возврат (спор)' },
+  { value: 'referral_bonus',         label: 'Реф. бонус' },
 ];
 
 const TYPE_LABEL = Object.fromEntries(TX_TYPES.slice(1).map(t => [t.value, t.label]));
@@ -32,7 +33,7 @@ const S = {
 
 function typeBadge(type) {
   const label = TYPE_LABEL[type] ?? type;
-  const isIn = ['deposit', 'order_cancel_refund', 'order_refund_excess', 'dispute_refund_customer', 'dispute_refund_full', 'order_payout'].includes(type);
+  const isIn = ['deposit', 'order_cancel_refund', 'order_refund_excess', 'dispute_refund_customer', 'dispute_refund_full', 'order_payout', 'referral_bonus'].includes(type);
   const isOut = ['withdrawal', 'order_payment', 'order_topup'].includes(type);
   const color = isIn ? '#22c55e' : isOut ? '#ef4444' : '#94a3b8';
   return (
