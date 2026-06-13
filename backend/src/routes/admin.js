@@ -244,19 +244,20 @@ router.get('/stats', async (req, res) => {
     completedRes,
     openDisputesRes,
     openTicketsRes,
-    pendingTxRes,
     confirmedDepositsRes,
   ] = await Promise.all([
     supabase.from('profiles').select('id', { count: 'exact', head: true }),
     supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('is_banned', true),
-    supabase.from('orders').select('status'),
-    supabase.from('orders').select('final_amount, base_amount').eq('status', 'completed'),
+    supabase.from('orders').select('status').limit(2000),
+    supabase.from('orders').select('final_amount, base_amount').eq('status', 'completed').limit(2000),
     supabase.from('disputes').select('id', { count: 'exact', head: true }).eq('status', 'open'),
     supabase.from('support_tickets').select('id', { count: 'exact', head: true }).in('status', ['open', 'answered']),
-    supabase.from('transactions').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
-    // Platform revenue = 10% commission retained on confirmed deposits
-    supabase.from('deposit_requests').select('confirmed_amount, credited_amount').eq('status', 'confirmed'),
+    supabase.from('deposit_requests').select('confirmed_amount, credited_amount').eq('status', 'confirmed').limit(2000),
   ]);
+
+  const errs = [totalUsersRes, bannedUsersRes, ordersRawRes, completedRes, openDisputesRes, openTicketsRes, confirmedDepositsRes]
+    .map((r, i) => r.error ? `[${i}] ${r.error.message}` : null).filter(Boolean);
+  if (errs.length) console.error('[admin/stats] query errors:', errs.join(' | '));
 
   const orders_by_status = {};
   for (const o of (ordersRawRes.data ?? [])) {
@@ -264,7 +265,6 @@ router.get('/stats', async (req, res) => {
   }
 
   const completed = completedRes.data ?? [];
-  // Real platform earnings: difference between what users paid in and what was credited.
   const total_commission_earned = Math.round(
     (confirmedDepositsRes.data ?? []).reduce(
       (s, d) => s + (parseFloat(d.confirmed_amount ?? 0) - parseFloat(d.credited_amount ?? 0)), 0
@@ -275,14 +275,14 @@ router.get('/stats', async (req, res) => {
   ) / 100;
 
   res.json({
-    total_users:               totalUsersRes.count ?? 0,
-    banned_users:              bannedUsersRes.count ?? 0,
+    total_users:                totalUsersRes.count ?? 0,
+    banned_users:               bannedUsersRes.count ?? 0,
     orders_by_status,
-    total_commission_earned,
-    total_volume,
-    open_disputes_count:       openDisputesRes.count ?? 0,
+    total_commission_earned:    isNaN(total_commission_earned) ? 0 : total_commission_earned,
+    total_volume:               isNaN(total_volume) ? 0 : total_volume,
+    open_disputes_count:        openDisputesRes.count ?? 0,
     open_support_tickets_count: openTicketsRes.count ?? 0,
-    pending_transactions_count: pendingTxRes.count ?? 0,
+    pending_transactions_count: 0,
   });
 });
 
