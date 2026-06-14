@@ -851,13 +851,21 @@ router.patch('/finance/expenses', async (req, res) => {
 router.get('/forum/flagged', async (req, res) => {
   const { data, error } = await supabase
     .from('forum_posts')
-    .select('id, content, moderation_status, moderation_reason, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url)')
+    .select(`
+      id, content, moderation_status, created_at,
+      author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url),
+      forum_moderation_log(ai_reason)
+    `)
     .eq('moderation_status', 'flagged')
     .eq('is_deleted', false)
     .order('created_at', { ascending: false })
     .limit(200);
   if (error) return serverError(res, error);
-  res.json(data ?? []);
+  res.json((data ?? []).map(post => ({
+    ...post,
+    moderation_reason: post.forum_moderation_log?.[0]?.ai_reason ?? null,
+    forum_moderation_log: undefined,
+  })));
 });
 
 // POST /admin/forum/posts/:id/approve
