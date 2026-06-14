@@ -4,6 +4,7 @@ const adminMiddleware = require('../middleware/admin');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { sanitizeSearchTerm } = require('../utils/search');
+const { sendTelegram } = require('../utils/telegramNotify');
 
 const router = Router();
 router.use(auth, adminMiddleware);
@@ -128,6 +129,10 @@ router.post('/disputes/:id/resolve', async (req, res) => {
   // Optional bans
   if (ban_customer)  await supabase.from('profiles').update({ is_banned: true }).eq('id', order.customer_id);
   if (ban_executor)  await supabase.from('profiles').update({ is_banned: true }).eq('id', order.executor_id);
+
+  sendTelegram(
+    `⚖️ Спор разрешён\nЗаказ: ${order.id}\nРешение: ${normalised === 'pay_executor' ? 'выплатить исполнителю' : 'вернуть заказчику'}`
+  );
 
   res.json({ success: true });
 });
@@ -410,32 +415,31 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   if (!confirmedAmount || confirmedAmount <= 0 || isNaN(confirmedAmount))
     return res.status(400).json({ error: 'Некорректная сумма подтверждения' });
 
-  // credited_amount always = 90% — this is what the user receives, unchanged
-  const creditedAmount = Math.round(confirmedAmount * 0.9 * 100) / 100;
-  const now = new Date().toISOString();
+  const creditedAmount    = Math.round(confirmedAmount * 0.9 * 100) / 100;
+  const platformGross     = Math.round(confirmedAmount * 0.1 * 100) / 100;
+  const now               = new Date().toISOString();
 
-  // Fetch referral info for the depositing user
+  // Referrer lookup — the final bonus decision is made atomically below via
+  // claim_referral_bonus_slot (race-free, capped at referral_max_count).
   const { data: userProfile } = await supabase
     .from('profiles')
-    .select('referred_by, referral_qualifying_deposits_count')
+    .select('nickname, referred_by')
     .eq('id', dep.user_id)
     .single();
 
-  const referrerId = userProfile?.referred_by ?? null;
-  const qualifyingCount = userProfile?.referral_qualifying_deposits_count ?? 0;
-  const referralEligible = referrerId != null && qualifyingCount < 3 && confirmedAmount >= 100;
-  const referralBonus = referralEligible ? Math.round(confirmedAmount * 0.05 * 100) / 100 : 0;
+  const referrerId    = userProfile?.referred_by ?? null;
+  const referralBonus = Math.round(confirmedAmount * 0.05 * 100) / 100;
+  const preEligible   = referrerId != null && confirmedAmount >= 100;
 
-  // Atomic claim — prevents double-processing
+  // Atomic claim — prevents double-processing of this deposit
   const { data: claimed, error: claimErr } = await supabase
     .from('deposit_requests')
     .update({
-      status: 'confirmed',
+      status:           'confirmed',
       confirmed_amount: confirmedAmount,
-      credited_amount: creditedAmount,
-      processed_by: req.userId,
-      processed_at: now,
-      ...(referralEligible ? { referral_bonus_applied: true, referral_bonus_amount: referralBonus } : {}),
+      credited_amount:  creditedAmount,
+      processed_by:     req.userId,
+      processed_at:     now,
     })
     .eq('id', req.params.id)
     .eq('status', 'pending')
@@ -444,27 +448,71 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   if (!claimed || claimed.length === 0)
     return res.status(409).json({ error: 'Заявка уже обработана' });
 
-  // Credit depositor
+  // Credit depositor's wallet
   await supabase.rpc('add_wallet_balance', { p_user_id: dep.user_id, p_amount: creditedAmount });
   await supabase.from('profiles').update({ last_deposit_confirmed_at: now }).eq('id', dep.user_id);
-  await supabase.from('transactions').insert({ user_id: dep.user_id, type: 'deposit', amount: creditedAmount, status: 'completed' });
 
-  // Referral bonus — 5% of confirmed_amount to referrer (out of the platform's 10%)
-  if (referralEligible) {
+  // Atomically claim a referral-bonus slot. Returns true only if a slot was free
+  // (count < cap), incrementing the counter under a row lock in the same call —
+  // so concurrent confirms can never grant more than `referral_max_count` bonuses.
+  let bonusApplied = false;
+  if (preEligible) {
+    const { data: slot } = await supabase.rpc('claim_referral_bonus_slot', { p_user_id: dep.user_id });
+    bonusApplied = slot === true;
+  }
+
+  if (bonusApplied) {
+    // deposit_referral: platform keeps gross 10%; net 5% after referral payout
+    await supabase.from('transactions').insert({
+      user_id:         dep.user_id,
+      type:            'deposit_referral',
+      amount:          creditedAmount,
+      status:          'completed',
+      platform_profit: platformGross,
+      meta:            { referrer_id: referrerId, referrer_bonus: referralBonus, platform_profit_net: platformGross - referralBonus },
+    });
+    await supabase.from('deposit_requests')
+      .update({ referral_bonus_applied: true, referral_bonus_amount: referralBonus })
+      .eq('id', req.params.id);
+
+    // Pay referral bonus
     await supabase.rpc('add_wallet_balance', { p_user_id: referrerId, p_amount: referralBonus });
     await supabase.rpc('add_referral_earnings', { p_user_id: referrerId, p_amount: referralBonus });
-    await supabase.from('profiles').update({
-      referral_qualifying_deposits_count: qualifyingCount + 1,
-    }).eq('id', dep.user_id);
     await supabase.from('transactions').insert({
       user_id: referrerId,
-      type: 'referral_bonus',
-      amount: referralBonus,
-      status: 'completed',
+      type:    'referral_bonus',
+      amount:  referralBonus,
+      status:  'completed',
+      meta:    { from_user_id: dep.user_id, deposit_amount: confirmedAmount },
+    });
+
+    // Notify admin in Telegram
+    const { data: referrerProfile } = await supabase.from('profiles').select('nickname').eq('id', referrerId).single();
+    sendTelegram(
+      `💰 Реферальный бонус\n` +
+      `Реферер: @${referrerProfile?.nickname ?? referrerId} получил ${referralBonus} ₽\n` +
+      `Депозит: ${confirmedAmount} ₽ от @${userProfile?.nickname ?? dep.user_id}`
+    );
+  } else {
+    // Regular deposit: platform keeps full 10%
+    await supabase.from('transactions').insert({
+      user_id:         dep.user_id,
+      type:            'deposit',
+      amount:          creditedAmount,
+      status:          'completed',
+      platform_profit: platformGross,
     });
   }
 
-  res.json({ success: true, credited_amount: creditedAmount, referral_bonus: referralBonus });
+  // Confirm notification
+  sendTelegram(
+    `✅ Пополнение подтверждено\n` +
+    `Пользователь: @${userProfile?.nickname ?? dep.user_id}\n` +
+    `Сумма: ${confirmedAmount} ₽ → зачислено: ${creditedAmount} ₽` +
+    (bonusApplied ? `\n🎁 Реферальный бонус: ${referralBonus} ₽` : '')
+  );
+
+  res.json({ success: true, credited_amount: creditedAmount, referral_bonus: bonusApplied ? referralBonus : 0 });
 });
 
 // POST /admin/deposits/:id/reject
@@ -708,24 +756,209 @@ router.get('/conversations', async (req, res) => {
 
 // ─── Settings ───────────────────────────────────────────────
 
-// PUT /admin/settings/:key
+// PUT /admin/settings/:key  (site_settings — payment requisites etc.)
 router.put('/settings/:key', async (req, res) => {
   const { key } = req.params;
   const { value } = req.body;
-
   if (value == null) return res.status(400).json({ error: 'value is required' });
-
   const { data, error } = await supabase
     .from('site_settings')
-    .upsert(
-      { key, value, updated_by: req.userId, updated_at: new Date().toISOString() },
-      { onConflict: 'key' }
-    )
-    .select()
-    .single();
-
+    .upsert({ key, value, updated_by: req.userId, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+    .select().single();
   if (error) return serverError(res, error);
   res.json(data);
+});
+
+// PUT /admin/admin-settings/:key  (admin_settings — rates, prices)
+router.put('/admin-settings/:key', async (req, res) => {
+  const { key } = req.params;
+  const { value } = req.body;
+  if (value == null) return res.status(400).json({ error: 'value is required' });
+  const { data, error } = await supabase
+    .from('admin_settings')
+    .upsert({ key, value: String(value), updated_by: req.userId, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+    .select().single();
+  if (error) return serverError(res, error);
+  res.json(data);
+});
+
+// GET /admin/settings — all settings from both tables
+router.get('/settings', async (req, res) => {
+  const [siteRes, adminRes] = await Promise.all([
+    supabase.from('site_settings').select('key, value'),
+    supabase.from('admin_settings').select('key, value'),
+  ]);
+  const site  = {};
+  for (const r of (siteRes.data  ?? [])) site[r.key]  = r.value;
+  const admin = {};
+  for (const r of (adminRes.data ?? [])) admin[r.key] = r.value;
+  res.json({ site, admin });
+});
+
+// ─── Finance ─────────────────────────────────────────────────
+
+// GET /admin/finance/summary
+router.get('/finance/summary', async (req, res) => {
+  const [txRes, balRes, expRes] = await Promise.all([
+    supabase.from('transactions')
+      .select('type, amount, platform_profit')
+      .in('type', ['deposit', 'deposit_referral', 'referral_bonus', 'balance_to_token'])
+      .eq('status', 'completed'),
+    supabase.from('profiles').select('balance'),
+    supabase.from('admin_settings').select('value').eq('key', 'platform_expenses').single(),
+  ]);
+
+  if (txRes.error) return serverError(res, txRes.error);
+
+  const txs = txRes.data ?? [];
+  const round2 = n => Math.round(n * 100) / 100;
+
+  const commission_regular    = round2(txs.filter(t => t.type === 'deposit').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
+  const commission_referral   = round2(txs.filter(t => t.type === 'deposit_referral').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
+  const referral_bonuses_paid = round2(txs.filter(t => t.type === 'referral_bonus').reduce((s, t) => s + parseFloat(t.amount ?? 0), 0));
+  const gost_tokens_revenue   = round2(txs.filter(t => t.type === 'balance_to_token').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
+  const total_platform_profit = round2(commission_regular + commission_referral - referral_bonuses_paid + gost_tokens_revenue);
+  const total_user_balances   = round2((balRes.data ?? []).reduce((s, p) => s + parseFloat(p.balance ?? 0), 0));
+  const platform_expenses     = parseFloat(expRes.data?.value ?? '0');
+  const available_to_withdraw = round2(total_platform_profit - platform_expenses);
+
+  res.json({
+    commission_regular,
+    commission_referral,
+    referral_bonuses_paid,
+    gost_tokens_revenue,
+    total_platform_profit,
+    total_user_balances,
+    platform_expenses,
+    available_to_withdraw,
+  });
+});
+
+// PATCH /admin/finance/expenses  { amount }
+router.patch('/finance/expenses', async (req, res) => {
+  const amount = parseFloat(req.body.amount);
+  if (isNaN(amount) || amount < 0) return res.status(400).json({ error: 'Некорректная сумма' });
+  const { error } = await supabase
+    .from('admin_settings')
+    .upsert({ key: 'platform_expenses', value: String(amount), updated_by: req.userId, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+  if (error) return serverError(res, error);
+  res.json({ success: true, platform_expenses: amount });
+});
+
+// ─── Forum moderation (admin) ─────────────────────────────────
+
+// GET /admin/forum/flagged
+router.get('/forum/flagged', async (req, res) => {
+  const { data, error } = await supabase
+    .from('forum_posts')
+    .select('id, content, moderation_status, moderation_reason, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url)')
+    .eq('moderation_status', 'flagged')
+    .eq('is_deleted', false)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/forum/posts/:id/approve
+router.post('/forum/posts/:id/approve', async (req, res) => {
+  const { error } = await supabase
+    .from('forum_posts')
+    .update({ moderation_status: 'approved' })
+    .eq('id', req.params.id);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
+// DELETE /admin/forum/posts/:id  (soft delete)
+router.delete('/forum/posts/:id', async (req, res) => {
+  const { error } = await supabase
+    .from('forum_posts')
+    .update({ is_deleted: true, moderation_status: 'approved' })
+    .eq('id', req.params.id);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
+// GET /admin/forum/reports
+router.get('/forum/reports', async (req, res) => {
+  const { data, error } = await supabase
+    .from('forum_reports')
+    .select(`
+      id, reason, status, created_at,
+      reporter:profiles!forum_reports_reporter_id_fkey(id, nickname),
+      post:forum_posts!forum_reports_post_id_fkey(
+        id, content, is_deleted,
+        author:profiles!forum_posts_author_id_fkey(id, nickname)
+      )
+    `)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/forum/reports/:id/resolve  { action: 'dismiss'|'delete_post' }
+router.post('/forum/reports/:id/resolve', async (req, res) => {
+  const { action } = req.body;
+  const { data: report, error: fetchErr } = await supabase
+    .from('forum_reports')
+    .select('id, post_id')
+    .eq('id', req.params.id)
+    .single();
+  if (fetchErr || !report) return res.status(404).json({ error: 'Жалоба не найдена' });
+
+  if (action === 'delete_post') {
+    await supabase.from('forum_posts').update({ is_deleted: true }).eq('id', report.post_id);
+  }
+  await supabase.from('forum_reports').update({ status: 'resolved' }).eq('id', req.params.id);
+  res.json({ success: true });
+});
+
+// ─── Forum categories (admin) ─────────────────────────────────
+
+// GET /admin/forum/categories
+router.get('/forum/categories', async (req, res) => {
+  const { data, error } = await supabase
+    .from('forum_categories')
+    .select('id, name, description, icon_name, sort_order, is_active')
+    .order('sort_order');
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/forum/categories
+router.post('/forum/categories', async (req, res) => {
+  const { name, description, icon_name, sort_order } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: 'Укажите название категории' });
+  const { data, error } = await supabase
+    .from('forum_categories')
+    .insert({ name: name.trim(), description: description ?? null, icon_name: icon_name ?? 'MessagesSquare', sort_order: sort_order ?? 99 })
+    .select().single();
+  if (error) return serverError(res, error);
+  res.status(201).json(data);
+});
+
+// PATCH /admin/forum/categories/:id
+router.patch('/forum/categories/:id', async (req, res) => {
+  const { name, description, icon_name, sort_order, is_active } = req.body;
+  const updates = {};
+  if (name        !== undefined) updates.name        = name;
+  if (description !== undefined) updates.description = description;
+  if (icon_name   !== undefined) updates.icon_name   = icon_name;
+  if (sort_order  !== undefined) updates.sort_order  = sort_order;
+  if (is_active   !== undefined) updates.is_active   = is_active;
+  if (!Object.keys(updates).length) return res.status(400).json({ error: 'Нет полей для обновления' });
+  const { error } = await supabase.from('forum_categories').update(updates).eq('id', req.params.id);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
+// DELETE /admin/forum/categories/:id
+router.delete('/forum/categories/:id', async (req, res) => {
+  const { error } = await supabase.from('forum_categories').delete().eq('id', req.params.id);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
 });
 
 module.exports = router;

@@ -3,6 +3,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const auth = require('../middleware/auth');
 const isBanned = require('../middleware/isBanned');
+const { sendTelegram } = require('../utils/telegramNotify');
 const supabase = require('../supabase_client');
 const { checkAndAutoConfirm } = require('../utils/autoConfirm');
 const { runAIChatCheck }      = require('../utils/aiChatCheck');
@@ -478,6 +479,8 @@ router.post('/:id/dispute', auth, isBanned, async (req, res) => {
 
   const { error: orderErr } = await supabase.from('orders').update({ status: 'disputed' }).eq('id', order.id);
   if (orderErr) return serverError(res, orderErr);
+
+  sendTelegram(`⚠️ Новый спор\nЗаказ: ${order.title ?? order.id}\nПричина: ${reason.trim().slice(0, 200)}`);
 
   res.json({ status: 'disputed' });
 });

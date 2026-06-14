@@ -12,6 +12,10 @@ const supportRouter        = require('./routes/support');
 const usersRouter          = require('./routes/users');
 const walletRouter         = require('./routes/wallet');
 const listingsRouter       = require('./routes/listings');
+const profileRouter        = require('./routes/profile');
+const forumRouter          = require('./routes/forum');
+const gostRouter           = require('./routes/gost');
+const { startForumAIJob }  = require('./utils/forumModerator');
 
 const app = express();
 
@@ -57,6 +61,12 @@ app.use('/support',        supportRouter);
 app.use('/users',          usersRouter);
 app.use('/wallet',         walletRouter);
 app.use('/listings',       listingsRouter);
+app.use('/profile',        profileRouter);
+app.use('/forum',          forumRouter);
+app.use('/gost',           gostRouter);
+
+// Start background AI forum moderation (fire-and-forget, every 10 min)
+startForumAIJob();
 
 // 404 for unmatched routes
 app.use((req, res) => {
