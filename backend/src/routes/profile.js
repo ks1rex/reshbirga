@@ -14,15 +14,34 @@ const PUBLIC_FIELDS = `
   average_rating, reviews_count, created_at
 `;
 
-// GET /profile/leaderboard — top 10 by reputation
+// GET /profile/leaderboard — top 10 by reputation gained in the last 7 days
 router.get('/leaderboard', async (req, res) => {
-  const { data, error } = await supabase
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: logs, error: logErr } = await supabase
+    .from('reputation_log')
+    .select('user_id, amount')
+    .gte('created_at', since);
+  if (logErr) return serverError(res, logErr);
+
+  const weekly = {};
+  for (const l of logs ?? []) weekly[l.user_id] = (weekly[l.user_id] ?? 0) + l.amount;
+
+  const topIds = Object.entries(weekly).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([id]) => id);
+  if (topIds.length === 0) return res.json({ users: [] });
+
+  const { data: profiles, error } = await supabase
     .from('profiles')
-    .select('id, nickname, avatar_url, level, reputation, deals_count')
-    .order('reputation', { ascending: false })
-    .limit(10);
+    .select('id, nickname, avatar_url, level, reputation, deals_count, is_admin')
+    .in('id', topIds)
+    .eq('is_admin', false);
   if (error) return serverError(res, error);
-  res.json({ users: data ?? [] });
+
+  const users = profiles
+    .map(({ is_admin, ...p }) => ({ ...p, weekly_reputation: weekly[p.id] ?? 0 }))
+    .sort((a, b) => b.weekly_reputation - a.weekly_reputation)
+    .slice(0, 10);
+
+  res.json({ users });
 });
 
 // GET /profile/:id/public — public profile card

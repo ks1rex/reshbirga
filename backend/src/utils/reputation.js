@@ -20,6 +20,7 @@ async function addReputation(supabase, userId, amount) {
   const { data: prof } = await supabase.from('profiles').select('reputation').eq('id', userId).single();
   const reputation = (prof?.reputation ?? 0) + amount;
   await supabase.from('profiles').update({ reputation, level: calculateLevel(reputation) }).eq('id', userId);
+  await supabase.from('reputation_log').insert({ user_id: userId, amount });
   return reputation;
 }
 
