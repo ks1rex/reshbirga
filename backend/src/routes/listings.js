@@ -6,6 +6,17 @@ const { serverError } = require('../utils/httpError');
 
 const router = Router();
 
+// Optional auth — GET / is the public catalog (ServicesCatalog, Market,
+// Home previews are all unauthenticated pages), so it must not 401 for
+// logged-out visitors. owner_id=me still needs req.userId, handled below.
+async function optionalAuth(req, _res, next) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return next();
+  const { data: { user } } = await supabase.auth.getUser(header.split(' ')[1]).catch(() => ({ data: {} }));
+  req.userId = user?.id ?? null;
+  next();
+}
+
 const CONTACT_EXCHANGE_SYSTEM_MSG = (reason) =>
   `⚠️ Для этого заказа предусмотрен обмен контактными данными: «${reason}».\n` +
   `Пожалуйста, фиксируйте момент передачи и возврата (фото/видео) и прикладывайте их в этот чат — без таких подтверждений сайт не может гарантировать честность сделки при споре.\n` +
@@ -56,13 +67,13 @@ router.post('/', auth, isBanned, async (req, res) => {
 });
 
 // ── GET /listings ─────────────────────────────────────────────────────────────
-router.get('/', auth, async (req, res) => {
-  const { search, owner_id } = req.query;
+router.get('/', optionalAuth, async (req, res) => {
+  const { search, owner_id, limit } = req.query;
   let q = supabase
     .from('listings')
     .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor)`)
     .order('created_at', { ascending: false })
-    .limit(200);
+    .limit(Math.min(200, Math.max(1, parseInt(limit ?? '200', 10))));
 
   if (owner_id && owner_id !== 'me') {
     q = q.eq('owner_id', owner_id);

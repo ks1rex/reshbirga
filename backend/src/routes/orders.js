@@ -15,6 +15,18 @@ const { addReputation, grantAchievement } = require('../utils/reputation');
 const router = Router();
 const upload = makeUploader();
 
+// Optional auth (sets req.userId if a valid token is sent, doesn't reject
+// anon) — the public feed (homepage/market preview) needs to render for
+// logged-out visitors too; already_applied just stays false for them.
+async function optionalAuth(req, _res, next) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return next();
+  const supabase = require('../supabase_client');
+  const { data: { user } } = await supabase.auth.getUser(header.split(' ')[1]).catch(() => ({ data: {} }));
+  req.userId = user?.id ?? null;
+  next();
+}
+
 const AUTO_CONFIRM_HOURS = parseFloat(process.env.AUTO_CONFIRM_HOURS ?? '24');
 
 const ORDER_DETAIL_SELECT = `
@@ -26,14 +38,15 @@ const ORDER_DETAIL_SELECT = `
 
 // ── FEED ─────────────────────────────────────────────────────────────────────
 
-router.get('/', auth, async (req, res) => {
-  const { search } = req.query;
+router.get('/', optionalAuth, async (req, res) => {
+  const { search, limit } = req.query;
+  const cap = Math.min(100, Math.max(1, parseInt(limit ?? '100', 10)));
   let q = supabase
     .from('orders')
-    .select('id, title, subject, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname)')
+    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url)')
     .eq('status', 'open')
     .order('created_at', { ascending: false })
-    .limit(100);
+    .limit(cap);
   const s = sanitizeSearchTerm(search);
   if (s) {
     q = q.or(`title.ilike.%${s}%,description.ilike.%${s}%,subject.ilike.%${s}%`);
@@ -41,6 +54,7 @@ router.get('/', auth, async (req, res) => {
   const { data: orders, error } = await q;
   if (error) return serverError(res, error);
   if (!orders?.length) return res.json([]);
+  if (!req.userId) return res.json(orders.map(o => ({ ...o, already_applied: false })));
   const orderIds = orders.map(o => o.id);
   const { data: apps } = await supabase
     .from('order_applications').select('order_id').eq('executor_id', req.userId).in('order_id', orderIds);

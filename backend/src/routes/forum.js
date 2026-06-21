@@ -44,21 +44,49 @@ router.get('/categories', async (req, res) => {
     .order('sort_order');
   if (error) return serverError(res, error, 'forum:categories');
 
-  // Augment with thread count + last thread info
+  // Augment with thread count + last 2 threads (preview list; last_thread
+  // kept as recent[0] for backward compat with existing frontend callers)
   const result = await Promise.all(cats.map(async (cat) => {
-    const [{ count }, { data: last }] = await Promise.all([
+    const [{ count }, { data: recent }] = await Promise.all([
       supabase.from('forum_threads').select('id', { count: 'exact', head: true }).eq('category_id', cat.id),
       supabase.from('forum_threads')
         .select('id, title, last_post_at, last_post_author:profiles!forum_threads_last_post_author_id_fkey(nickname, avatar_url)')
         .eq('category_id', cat.id)
         .order('last_post_at', { ascending: false, nullsFirst: false })
-        .limit(1)
-        .maybeSingle(),
+        .limit(2),
     ]);
-    return { ...cat, threads_count: count ?? 0, last_thread: last ?? null };
+    return { ...cat, threads_count: count ?? 0, recent_threads: recent ?? [], last_thread: recent?.[0] ?? null };
   }));
 
   res.json(result);
+});
+
+// ── GET /forum/threads — global list across categories (home page, hot threads) ──
+// ?sort=activity|date|top  ?limit=N (default 10, max 50)
+router.get('/threads', async (req, res) => {
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? '10', 10)));
+  const sort  = req.query.sort ?? 'activity';
+  const AUTHOR   = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url)';
+  const CATEGORY = 'category:forum_categories(id, name, icon_name)';
+
+  let q = supabase
+    .from('forum_threads')
+    .select(`id, title, posts_count, views_count, created_at, last_post_at, ${AUTHOR}, ${CATEGORY}`);
+
+  if (sort === 'date')      q = q.order('created_at', { ascending: false });
+  else if (sort === 'top')  q = q.order('views_count', { ascending: false });
+  else                      q = q.order('last_post_at', { ascending: false, nullsFirst: false });
+
+  const { data, error } = await q.limit(limit);
+  if (error) return serverError(res, error, 'forum:threads-global');
+  res.json(data ?? []);
+});
+
+// ── GET /forum/trending-tags ──────────────────────────────────────────────────
+// forum_threads/forum_posts have no tags column yet — static popular set until
+// tagging ships. Swap for a real aggregation once a tags column exists.
+router.get('/trending-tags', async (req, res) => {
+  res.json({ tags: ['термех', 'сессия2026', 'газпромнефть', 'общага', 'курсач', 'стипуха', 'форум', 'губкин'] });
 });
 
 // ── GET /forum/categories/:id/threads ────────────────────────────────────────

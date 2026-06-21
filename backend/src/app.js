@@ -15,6 +15,7 @@ const listingsRouter       = require('./routes/listings');
 const profileRouter        = require('./routes/profile');
 const forumRouter          = require('./routes/forum');
 const gostRouter           = require('./routes/gost');
+const statsRouter          = require('./routes/stats');
 const { startForumAIJob }  = require('./utils/forumModerator');
 
 const app = express();
@@ -64,6 +65,7 @@ app.use('/listings',       listingsRouter);
 app.use('/profile',        profileRouter);
 app.use('/forum',          forumRouter);
 app.use('/gost',           gostRouter);
+app.use('/stats',          statsRouter);
 
 // Start background AI forum moderation (fire-and-forget, every 10 min)
 startForumAIJob();
