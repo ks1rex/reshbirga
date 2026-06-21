@@ -42,6 +42,50 @@ router.get('/', async (req, res) => {
   });
 });
 
+const MONTH_NAMES = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
+const INCOME_TYPES  = ['deposit', 'deposit_referral', 'referral_bonus'];
+const OUTCOME_TYPES = ['withdrawal', 'gost_tokens'];
+
+// GET /wallet/chart — last 6 months of income/outcome
+router.get('/chart', async (req, res) => {
+  const since = new Date();
+  since.setMonth(since.getMonth() - 5, 1);
+  since.setHours(0, 0, 0, 0);
+
+  const { data: txs, error } = await supabase
+    .from('transactions')
+    .select('type, amount, created_at')
+    .eq('user_id', req.userId)
+    .eq('status', 'completed')
+    .in('type', [...INCOME_TYPES, ...OUTCOME_TYPES])
+    .gte('created_at', since.toISOString());
+  if (error) return serverError(res, error);
+
+  const months = [];
+  const income = [];
+  const outcome = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date();
+    d.setMonth(d.getMonth() - i, 1);
+    months.push(MONTH_NAMES[d.getMonth()]);
+    income.push(0);
+    outcome.push(0);
+  }
+
+  for (const tx of txs ?? []) {
+    const d = new Date(tx.created_at);
+    const monthsAgo = (since.getFullYear() === d.getFullYear())
+      ? d.getMonth() - since.getMonth()
+      : d.getMonth() - since.getMonth() + 12 * (d.getFullYear() - since.getFullYear());
+    if (monthsAgo < 0 || monthsAgo > 5) continue;
+    const amount = parseFloat(tx.amount ?? 0);
+    if (INCOME_TYPES.includes(tx.type)) income[monthsAgo] += amount;
+    else outcome[monthsAgo] += amount;
+  }
+
+  res.json({ months, income, outcome });
+});
+
 // POST /wallet/deposits — create deposit request
 router.post('/deposits', isBanned, async (req, res) => {
   const claimed_amount = parseFloat(req.body.claimed_amount);

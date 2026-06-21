@@ -10,6 +10,7 @@ const { runAIChatCheck }      = require('../utils/aiChatCheck');
 const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
 const { sanitizeSearchTerm } = require('../utils/search');
+const { addReputation, grantAchievement } = require('../utils/reputation');
 
 const router = Router();
 const upload = makeUploader();
@@ -88,7 +89,7 @@ router.get('/applied', auth, async (req, res) => {
 // ── CREATE ────────────────────────────────────────────────────────────────────
 
 router.post('/', auth, isBanned, async (req, res) => {
-  const { title, description, subject, base_amount, requires_contact_exchange, contact_exchange_reason } = req.body;
+  const { title, description, subject, base_amount, requires_contact_exchange, contact_exchange_reason, category } = req.body;
   if (requires_contact_exchange && !contact_exchange_reason?.trim())
     return res.status(400).json({ error: 'Укажите, для чего нужен обмен контактами' });
   if (!title || !description || !subject || base_amount == null)
@@ -122,6 +123,7 @@ router.post('/', auth, isBanned, async (req, res) => {
       final_amount: null, deposit_amount: 0,
       requires_contact_exchange: !!requires_contact_exchange,
       contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
+      category: category || null,
       status: 'open',
     })
     .select().single();
@@ -429,6 +431,18 @@ router.post('/:id/confirm', auth, async (req, res) => {
       type: 'order_payout', amount: payoutAmount, status: 'completed',
     });
 
+    // Deal/reputation/achievement bookkeeping for the executor
+    const { data: execProf } = await supabase.from('profiles')
+      .select('deals_count').eq('id', order.executor_id).single();
+    const dealsCount = (execProf?.deals_count ?? 0) + 1;
+    await supabase.from('profiles').update({ deals_count: dealsCount }).eq('id', order.executor_id);
+    await addReputation(supabase, order.executor_id, 50);
+    if (dealsCount === 1)   await grantAchievement(supabase, order.executor_id, 'first_deal');
+    if (dealsCount === 5)   await grantAchievement(supabase, order.executor_id, 'deals_5');
+    if (dealsCount === 20)  await grantAchievement(supabase, order.executor_id, 'deals_20');
+    if (dealsCount === 50)  await grantAchievement(supabase, order.executor_id, 'deals_50');
+    if (dealsCount === 100) await grantAchievement(supabase, order.executor_id, 'deals_100');
+
     // Return deposit to customer if any
     const depositAmt = Math.round(parseFloat(order.deposit_amount ?? 0) * 100) / 100;
     if (depositAmt > 0) {
@@ -533,6 +547,22 @@ router.post('/:id/reviews', auth, isBanned, async (req, res) => {
     .insert({ order_id: orderId, reviewer_id: req.userId, reviewee_id, context, rating: r, comment: comment?.trim() || null })
     .select().single();
   if (error) return serverError(res, error);
+
+  // Reputation for the rating + achievement checks (DB trigger already
+  // recalculated profiles.average_rating/reviews_count on insert above).
+  if (r === 5) await addReputation(supabase, reviewee_id, 30);
+  else if (r === 4) await addReputation(supabase, reviewee_id, 15);
+
+  const { data: revProf } = await supabase.from('profiles')
+    .select('average_rating, reviews_count').eq('id', reviewee_id).single();
+  if ((revProf?.reviews_count ?? 0) >= 10 && (revProf?.average_rating ?? 0) >= 4.8) {
+    await grantAchievement(supabase, reviewee_id, 'top_rated');
+  }
+  const { data: last5 } = await supabase.from('reviews')
+    .select('rating').eq('reviewee_id', reviewee_id).order('created_at', { ascending: false }).limit(5);
+  if (last5?.length === 5 && last5.every(rv => rv.rating === 5)) {
+    await grantAchievement(supabase, reviewee_id, 'perfect_score');
+  }
 
   res.status(201).json(review);
 });

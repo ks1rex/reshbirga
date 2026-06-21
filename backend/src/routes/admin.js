@@ -5,6 +5,7 @@ const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { sanitizeSearchTerm } = require('../utils/search');
 const { sendTelegram } = require('../utils/telegramNotify');
+const { grantAchievement } = require('../utils/reputation');
 
 const router = Router();
 router.use(auth, adminMiddleware);
@@ -452,6 +453,12 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   await supabase.rpc('add_wallet_balance', { p_user_id: dep.user_id, p_amount: creditedAmount });
   await supabase.from('profiles').update({ last_deposit_confirmed_at: now }).eq('id', dep.user_id);
 
+  // wallet_top achievement: 5000₽+ in cumulative topups
+  const { data: topupProf } = await supabase.from('profiles').select('wallet_topup_total').eq('id', dep.user_id).single();
+  const topupTotal = parseFloat(topupProf?.wallet_topup_total ?? 0) + confirmedAmount;
+  await supabase.from('profiles').update({ wallet_topup_total: topupTotal }).eq('id', dep.user_id);
+  if (topupTotal >= 5000) await grantAchievement(supabase, dep.user_id, 'wallet_top');
+
   // Atomically claim a referral-bonus slot. Returns true only if a slot was free
   // (count < cap), incrementing the counter under a row lock in the same call —
   // so concurrent confirms can never grant more than `referral_max_count` bonuses.
@@ -485,6 +492,12 @@ router.post('/deposits/:id/confirm', async (req, res) => {
       status:  'completed',
       meta:    { from_user_id: dep.user_id, deposit_amount: confirmedAmount },
     });
+
+    // referrer achievement: 3+ referred users with at least one qualifying deposit
+    const { count: qualifyingReferrals } = await supabase
+      .from('profiles').select('id', { count: 'exact', head: true })
+      .eq('referred_by', referrerId).gt('referral_qualifying_deposits_count', 0);
+    if ((qualifyingReferrals ?? 0) >= 3) await grantAchievement(supabase, referrerId, 'referrer');
 
     // Notify admin in Telegram
     const { data: referrerProfile } = await supabase.from('profiles').select('nickname').eq('id', referrerId).single();

@@ -27,9 +27,16 @@ function validateListing({ title, description, price, deposit_amount, requires_c
   return null;
 }
 
+// ── GET /listings/categories ──────────────────────────────────────────────────
+router.get('/categories', async (req, res) => {
+  const { data, error } = await supabase.from('market_categories').select('*').order('sort_order');
+  if (error) return serverError(res, error);
+  res.json({ categories: data ?? [] });
+});
+
 // ── POST /listings ────────────────────────────────────────────────────────────
 router.post('/', auth, isBanned, async (req, res) => {
-  const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason } = req.body;
+  const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason, category } = req.body;
   const validationError = validateListing(req.body);
   if (validationError) return res.status(400).json({ error: validationError });
 
@@ -41,6 +48,7 @@ router.post('/', auth, isBanned, async (req, res) => {
     deposit_amount: parseFloat(deposit_amount ?? 0),
     requires_contact_exchange: !!requires_contact_exchange,
     contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
+    category: category || null,
     is_active: true,
   }).select().single();
   if (error) return serverError(res, error);

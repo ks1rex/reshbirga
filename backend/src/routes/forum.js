@@ -4,6 +4,7 @@ const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { moderateSync } = require('../utils/forumModerator');
 const { serverError }  = require('../utils/httpError');
+const { addReputation, grantAchievement } = require('../utils/reputation');
 
 const router   = Router();
 const PAGE_SIZE = 20;
@@ -23,6 +24,16 @@ async function requireAdmin(req, res, next) {
   const { data } = await supabase.from('profiles').select('is_admin').eq('id', req.userId).single();
   if (!data?.is_admin) return res.status(403).json({ error: 'Только для администраторов' });
   next();
+}
+
+// +1 forum_posts_count, grants first_post/posts_50/posts_200 at the right counts
+async function bumpForumPostsCount(userId) {
+  const { data: prof } = await supabase.from('profiles').select('forum_posts_count').eq('id', userId).single();
+  const count = (prof?.forum_posts_count ?? 0) + 1;
+  await supabase.from('profiles').update({ forum_posts_count: count }).eq('id', userId);
+  if (count === 1)   await grantAchievement(supabase, userId, 'first_post');
+  if (count === 50)  await grantAchievement(supabase, userId, 'posts_50');
+  if (count === 200) await grantAchievement(supabase, userId, 'posts_200');
 }
 
 // ── GET /forum/categories ─────────────────────────────────────────────────────
@@ -119,6 +130,9 @@ router.post('/threads', auth, isBanned, async (req, res) => {
   });
   if (pe) return serverError(res, pe, 'forum:create-first-post');
 
+  await addReputation(supabase, req.userId, 5);
+  await bumpForumPostsCount(req.userId);
+
   res.status(201).json({ thread_id: thread.id });
 });
 
@@ -132,6 +146,23 @@ router.post('/threads/:id/view', async (req, res) => {
       });
   });
   res.status(204).end();
+
+  // Author rep bonuses / achievements at view milestones (fire-and-forget, after response)
+  const { data: thread } = await supabase.from('forum_threads')
+    .select('author_id, views_count, rep_bonus_50_given, rep_bonus_200_given')
+    .eq('id', req.params.id).single();
+  if (thread) {
+    if (thread.views_count >= 50 && !thread.rep_bonus_50_given) {
+      await addReputation(supabase, thread.author_id, 10);
+      await supabase.from('forum_threads').update({ rep_bonus_50_given: true }).eq('id', req.params.id);
+    }
+    if (thread.views_count >= 200 && !thread.rep_bonus_200_given) {
+      await addReputation(supabase, thread.author_id, 25);
+      await supabase.from('forum_threads').update({ rep_bonus_200_given: true }).eq('id', req.params.id);
+    }
+    if (thread.views_count >= 500)  await grantAchievement(supabase, thread.author_id, 'popular_thread');
+    if (thread.views_count >= 2000) await grantAchievement(supabase, thread.author_id, 'viral_thread');
+  }
 });
 
 // ── GET /forum/threads/:id/posts ──────────────────────────────────────────────
@@ -194,6 +225,10 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
     .single();
 
   if (error) return serverError(res, error, 'forum:reply');
+
+  await addReputation(supabase, req.userId, 2);
+  await bumpForumPostsCount(req.userId);
+
   res.status(201).json(post);
 });
 
