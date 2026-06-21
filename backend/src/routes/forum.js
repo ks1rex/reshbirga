@@ -169,7 +169,7 @@ router.post('/threads/:id/view', async (req, res) => {
 router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
   const page   = Math.max(1, parseInt(req.query.page ?? '1', 10));
   const offset = (page - 1) * PAGE_SIZE;
-  const AUTHOR = 'author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url, rating_as_executor)';
+  const AUTHOR = 'author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url, rating_as_executor, level)';
 
   const { data: posts, error } = await supabase
     .from('forum_posts')
