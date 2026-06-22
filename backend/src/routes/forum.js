@@ -318,6 +318,7 @@ router.post('/posts/:id/react', auth, async (req, res) => {
 router.post('/report', auth, async (req, res) => {
   const { post_id, reason } = req.body;
   if (!post_id || !reason?.trim()) return res.status(400).json({ error: 'Укажите пост и причину жалобы' });
+  if (reason.length > 2000) return res.status(400).json({ error: 'Слишком длинный текст жалобы' });
 
   const { error } = await supabase.from('forum_reports').insert({
     post_id,
