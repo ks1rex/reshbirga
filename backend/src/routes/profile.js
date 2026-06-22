@@ -9,7 +9,7 @@ const router = Router();
 router.use(auth);
 
 const PUBLIC_FIELDS = `
-  id, nickname, full_name, avatar_url, bio, is_verified, skills,
+  id, nickname, full_name, avatar_url, bio, skills,
   level, reputation, forum_posts_count, deals_count,
   average_rating, reviews_count, created_at
 `;
@@ -128,7 +128,7 @@ router.get('/', async (req, res) => {
       referral_registered_count, referral_qualifying_deposits_count,
       rating_as_customer, rating_as_executor,
       reviews_count_customer, reviews_count_executor,
-      bio, is_verified, skills, level, reputation,
+      bio, skills, level, reputation,
       forum_posts_count, deals_count, average_rating, reviews_count,
       is_banned, created_at, updated_at
     `)
