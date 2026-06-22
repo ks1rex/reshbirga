@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const supabase = require('../supabase_client');
-const { grantAchievement } = require('../utils/reputation');
 
 const GOST_URL = process.env.GOST_BACKEND_URL;
 
@@ -65,13 +64,12 @@ router.post('/buy-tokens', auth, async (req, res) => {
 
     const { data: profile } = await supabase
       .from('profiles')
-      .select('balance, token_balance, gost_uses')
+      .select('balance, token_balance')
       .eq('id', req.userId)
       .single();
 
-    const gostUses = (profile?.gost_uses ?? 0) + 1;
-    await supabase.from('profiles').update({ gost_uses: gostUses }).eq('id', req.userId);
-    if (gostUses >= 10) await grantAchievement(supabase, req.userId, 'gost_master');
+    // gost_master achievement is granted on actual document generation
+    // (counted in the GOST backend's /generate), not on token purchase.
 
     res.json({
       token_balance: profile.token_balance,
