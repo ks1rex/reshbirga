@@ -416,8 +416,24 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   if (!confirmedAmount || confirmedAmount <= 0 || isNaN(confirmedAmount))
     return res.status(400).json({ error: 'Некорректная сумма подтверждения' });
 
-  const creditedAmount    = Math.round(confirmedAmount * 0.9 * 100) / 100;
-  const platformGross     = Math.round(confirmedAmount * 0.1 * 100) / 100;
+  // Commission / referral parameters are admin-configurable via admin_settings;
+  // fall back to the documented defaults (10% / 5% / 100₽) if a row is missing
+  // or malformed so confirmation never breaks on bad config.
+  const { data: settingsRows } = await supabase
+    .from('admin_settings')
+    .select('key, value')
+    .in('key', ['deposit_commission_pct', 'referral_bonus_pct', 'referral_min_amount']);
+  const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
+  const num = (key, fallback) => {
+    const v = parseFloat(settings[key]);
+    return Number.isFinite(v) ? v : fallback;
+  };
+  const commissionPct = num('deposit_commission_pct', 10);
+  const referralPct   = num('referral_bonus_pct', 5);
+  const referralMin   = num('referral_min_amount', 100);
+
+  const creditedAmount    = Math.round(confirmedAmount * (1 - commissionPct / 100) * 100) / 100;
+  const platformGross     = Math.round(confirmedAmount * (commissionPct / 100) * 100) / 100;
   const now               = new Date().toISOString();
 
   // Referrer lookup — the final bonus decision is made atomically below via
@@ -429,8 +445,8 @@ router.post('/deposits/:id/confirm', async (req, res) => {
     .single();
 
   const referrerId    = userProfile?.referred_by ?? null;
-  const referralBonus = Math.round(confirmedAmount * 0.05 * 100) / 100;
-  const preEligible   = referrerId != null && confirmedAmount >= 100;
+  const referralBonus = Math.round(confirmedAmount * (referralPct / 100) * 100) / 100;
+  const preEligible   = referrerId != null && confirmedAmount >= referralMin;
 
   // Atomic claim — prevents double-processing of this deposit
   const { data: claimed, error: claimErr } = await supabase
