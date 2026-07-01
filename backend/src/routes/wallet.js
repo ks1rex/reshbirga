@@ -189,7 +189,7 @@ router.post('/vip', isBanned, async (req, res) => {
   const result = rows?.[0];
   if (!result?.success) return res.status(400).json({ error: 'Недостаточно средств на балансе' });
 
-  res.json({ success: true, vip_expires_at: result.vip_expires_at });
+  res.json({ success: true, vip_expires_at: result.new_vip_expires_at });
 });
 
 module.exports = router;

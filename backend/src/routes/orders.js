@@ -11,6 +11,7 @@ const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
 const { sanitizeSearchTerm } = require('../utils/search');
 const { addReputation, grantAchievement } = require('../utils/reputation');
+const { getListingUsage } = require('../utils/listingLimit');
 
 const router = Router();
 const upload = makeUploader();
@@ -45,6 +46,7 @@ router.get('/', optionalAuth, async (req, res) => {
     .from('orders')
     .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url)')
     .eq('status', 'open')
+    .eq('is_hidden', false)
     .order('created_at', { ascending: false })
     .limit(cap);
   const s = sanitizeSearchTerm(search);
@@ -67,7 +69,7 @@ router.get('/', optionalAuth, async (req, res) => {
 router.get('/mine', auth, async (req, res) => {
   const { data: orders, error } = await supabase
     .from('orders')
-    .select('id, title, subject, order_type, base_amount, final_amount, reserved_amount, required_topup, status, created_at, completed_at, confirmed_by_customer, confirmed_by_executor, confirmation_deadline, executor_id')
+    .select('id, title, subject, order_type, base_amount, final_amount, reserved_amount, required_topup, status, created_at, completed_at, confirmed_by_customer, confirmed_by_executor, confirmation_deadline, executor_id, is_hidden, hidden_reason')
     .eq('customer_id', req.userId)
     .order('created_at', { ascending: false });
   if (error) return serverError(res, error);
@@ -76,7 +78,11 @@ router.get('/mine', auth, async (req, res) => {
   for (const order of (orders ?? [])) {
     if (await checkAndAutoConfirm(order)) autoConfirmedIds.add(order.id);
   }
-  res.json((orders ?? []).map(o => autoConfirmedIds.has(o.id) ? { ...o, status: 'completed' } : o));
+  const { used, limit } = await getListingUsage(req.userId);
+  res.json({
+    orders: (orders ?? []).map(o => autoConfirmedIds.has(o.id) ? { ...o, status: 'completed' } : o),
+    usage: { used, limit },
+  });
 });
 
 // ── EXECUTOR'S APPLIED ORDERS ─────────────────────────────────────────────────
@@ -113,6 +119,11 @@ router.post('/', auth, isBanned, async (req, res) => {
   const amount = parseFloat(base_amount);
   if (isNaN(amount) || amount <= 0) return res.status(400).json({ error: 'base_amount must be positive' });
   if (amount > 1000000) return res.status(400).json({ error: 'Сумма заказа слишком большая' });
+
+  const { used, limit } = await getListingUsage(req.userId);
+  if (used >= limit) {
+    return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.` });
+  }
 
   // No platform commission on orders — 1:1 balance transfer
   const reserved = Math.round(amount * 100) / 100;
@@ -153,6 +164,32 @@ router.post('/', auth, isBanned, async (req, res) => {
   });
 
   res.status(201).json(order);
+});
+
+// ── VISIBILITY (owner hides/shows own listing-style open order) ──────────────
+
+router.patch('/:id/visibility', auth, isBanned, async (req, res) => {
+  const { hidden } = req.body;
+  if (typeof hidden !== 'boolean') return res.status(400).json({ error: 'hidden must be boolean' });
+
+  const { data: order } = await supabase.from('orders').select('id, customer_id, status').eq('id', req.params.id).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.customer_id !== req.userId) return res.status(403).json({ error: 'Forbidden' });
+  if (order.status !== 'open') return res.status(400).json({ error: 'Скрывать/показывать можно только открытый заказ' });
+
+  if (!hidden) {
+    const { used, limit } = await getListingUsage(req.userId);
+    if (used >= limit) {
+      return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте другое объявление или купите VIP.` });
+    }
+  }
+
+  const { data: updated, error } = await supabase.from('orders')
+    .update({ is_hidden: hidden, hidden_reason: hidden ? 'owner' : null })
+    .eq('id', req.params.id)
+    .select('id, is_hidden, hidden_reason').single();
+  if (error) return serverError(res, error);
+  res.json(updated);
 });
 
 // ── PENDING REVIEWS ───────────────────────────────────────────────────────────

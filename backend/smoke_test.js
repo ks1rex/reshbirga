@@ -591,6 +591,127 @@ async function run() {
     }
   } catch (e) { fail(18, 'Ban/unban', e.message); }
 
+  // ── Step 19: Listing limits ────────────────────────────────────────────────
+  console.log('\nStep 19 — Listing limits');
+  try {
+    // exec2 is fresh (no listings created in earlier steps) — base limit = 2.
+    const mkListing = (token, title) => api('POST', '/listings', token, {
+      title, description: 'Smoke listing', price: 100,
+    });
+
+    const l1 = await mkListing(exec2Token, 'Smoke L1');
+    const l2 = await mkListing(exec2Token, 'Smoke L2');
+    if (l1.status === 201 && l2.status === 201) ok(19, 'Base user: 2 listings created up to limit');
+    else fail(19, 'Base limit setup', `l1=${l1.status} l2=${l2.status}`);
+
+    const l3 = await mkListing(exec2Token, 'Smoke L3 over limit');
+    if (l3.status === 400) ok(19, 'Base user: 3rd listing rejected (limit=2)');
+    else fail(19, '3rd listing should be rejected', `status=${l3.status} ${JSON.stringify(l3.body)}`);
+
+    // Hide L1 → capacity freed → creation succeeds again
+    const l1Id = l1.body.id;
+    const rToggleOff = await api('PATCH', `/listings/${l1Id}/toggle`, exec2Token, {});
+    if (rToggleOff.status === 200 && rToggleOff.body.is_active === false) ok(19, 'Toggled L1 off');
+    else fail(19, 'Toggle off', `status=${rToggleOff.status} ${JSON.stringify(rToggleOff.body)}`);
+
+    const l3b = await mkListing(exec2Token, 'Smoke L3 after freeing slot');
+    if (l3b.status === 201) ok(19, 'Listing creation succeeds again after hiding one');
+    else fail(19, 'Creation after hide', `status=${l3b.status} ${JSON.stringify(l3b.body)}`);
+
+    // Grant VIP directly (bypassing the purchase flow — trigger only blocks
+    // updates carrying a real user JWT, service-role writes go through).
+    const vipUntil = new Date(Date.now() + 30 * 86400000).toISOString();
+    await adminSupabase.from('profiles').update({ vip_expires_at: vipUntil }).eq('id', exec2Id);
+
+    // Now at 2 active (L2, L3b) with VIP limit=10 — create up to the cap.
+    let vipOk = true;
+    const vipListingIds = [];
+    for (let i = 0; i < 7; i++) {
+      const r = await mkListing(exec2Token, `Smoke VIP L${i}`);
+      if (r.status !== 201) { vipOk = false; fail(19, `VIP listing #${i}`, `status=${r.status} ${JSON.stringify(r.body)}`); break; }
+      vipListingIds.push(r.body.id);
+    }
+    if (vipOk) ok(19, 'VIP user: reached 9 active listings (2 base + 7 more)');
+
+    const rOver = await mkListing(exec2Token, 'Smoke VIP over cap');
+    if (rOver.status === 201) ok(19, 'VIP user: 10th listing (at cap) accepted');
+    else fail(19, '10th listing should be accepted at VIP cap', `status=${rOver.status} ${JSON.stringify(rOver.body)}`);
+
+    const rOver2 = await mkListing(exec2Token, 'Smoke VIP over cap 2');
+    if (rOver2.status === 400) ok(19, 'VIP user: 11th listing rejected (limit=10)');
+    else fail(19, '11th listing should be rejected', `status=${rOver2.status} ${JSON.stringify(rOver2.body)}`);
+  } catch (e) { fail(19, 'Listing limits', e.message); }
+
+  // ── Step 20: Order visibility toggle (owner hide/show) ────────────────────
+  console.log('\nStep 20 — Order visibility toggle');
+  try {
+    await setBalance(custId, 5000);
+    const ro = await api('POST', '/orders', custToken, {
+      title: 'Smoke visibility', description: '...', subject: 'X', order_type: 'order', base_amount: 100,
+    });
+    if (ro.status !== 201) { fail(20, 'Create order for visibility test', JSON.stringify(ro.body)); }
+    else {
+      const ovId = ro.body.id;
+      const feedBefore = await api('GET', '/orders', null, null);
+      const seenBefore = (feedBefore.body ?? []).some(o => o.id === ovId);
+
+      const rHide = await api('PATCH', `/orders/${ovId}/visibility`, custToken, { hidden: true });
+      if (rHide.status === 200 && rHide.body.is_hidden === true) ok(20, 'Order hidden by owner');
+      else fail(20, 'Hide order', `status=${rHide.status} ${JSON.stringify(rHide.body)}`);
+
+      const feedAfter = await api('GET', '/orders', null, null);
+      const seenAfter = (feedAfter.body ?? []).some(o => o.id === ovId);
+      if (seenBefore && !seenAfter) ok(20, 'Hidden order excluded from public feed');
+      else fail(20, 'Feed filter', `seenBefore=${seenBefore} seenAfter=${seenAfter}`);
+
+      const rDetail = await api('GET', `/orders/${ovId}`, custToken, null);
+      if (rDetail.status === 200) ok(20, 'Hidden order still reachable via direct GET /:id');
+      else fail(20, 'Direct GET on hidden order', `status=${rDetail.status}`);
+
+      const rShow = await api('PATCH', `/orders/${ovId}/visibility`, custToken, { hidden: false });
+      if (rShow.status === 200 && rShow.body.is_hidden === false) ok(20, 'Order un-hidden by owner (within limit)');
+      else fail(20, 'Un-hide order', `status=${rShow.status} ${JSON.stringify(rShow.body)}`);
+    }
+  } catch (e) { fail(20, 'Order visibility', e.message); }
+
+  // ── Step 21: GOST token purchase — VIP discount ───────────────────────────
+  console.log('\nStep 21 — GOST token purchase, non-VIP then VIP discount');
+  try {
+    await setBalance(custId, 5000);
+    // custId was made VIP in Step 15 — clear it so the non-VIP branch is genuinely non-VIP.
+    await adminSupabase.from('profiles').update({ vip_expires_at: null }).eq('id', custId);
+    const r1 = await api('POST', '/gost/buy-tokens', custToken, { token_amount: 10 });
+    if (r1.status === 200 && r1.body.cost === 100) {
+      const { data: tx1 } = await adminSupabase
+        .from('transactions').select('meta').eq('user_id', custId).eq('type', 'balance_to_token')
+        .order('created_at', { ascending: false }).limit(1).single();
+      if (!tx1?.meta?.vip_discount_applied)
+        ok(21, `Non-VIP purchase full price: ${r1.body.cost} ₽, meta.vip_discount_applied=false`);
+      else
+        fail(21, 'Non-VIP purchase should not carry discount', JSON.stringify(tx1?.meta));
+    } else {
+      fail(21, 'Non-VIP token purchase', `status=${r1.status} ${JSON.stringify(r1.body)}`);
+    }
+
+    // Make user VIP directly, then buy again — expect 20% discount from admin_settings
+    await adminSupabase.from('profiles')
+      .update({ vip_expires_at: new Date(Date.now() + 30 * 86400000).toISOString() })
+      .eq('id', custId);
+
+    const r2 = await api('POST', '/gost/buy-tokens', custToken, { token_amount: 10 });
+    if (r2.status === 200 && Math.abs(r2.body.cost - 80) < 0.01) {
+      const { data: tx2 } = await adminSupabase
+        .from('transactions').select('meta').eq('user_id', custId).eq('type', 'balance_to_token')
+        .order('created_at', { ascending: false }).limit(1).single();
+      if (tx2?.meta?.vip_discount_applied === true && tx2?.meta?.discount_pct === 20)
+        ok(21, `VIP purchase discounted: ${r2.body.cost} ₽ (20% off), meta recorded`);
+      else
+        fail(21, 'VIP purchase meta missing discount info', JSON.stringify(tx2?.meta));
+    } else {
+      fail(21, 'VIP token purchase discount', `status=${r2.status} ${JSON.stringify(r2.body)}`);
+    }
+  } catch (e) { fail(21, 'GOST VIP discount flow', e.message); }
+
   summary();
 }
 

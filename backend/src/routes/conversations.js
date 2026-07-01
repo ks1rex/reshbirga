@@ -57,9 +57,15 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   // Get conversation details (type, order_type, support_ticket_id)
   const { data: conv } = await supabase
     .from('conversations')
-    .select('id, type, order_id, support_ticket_id, orders!conversations_order_id_fkey(order_type, requires_contact_exchange)')
+    .select('id, type, order_id, support_ticket_id, orders!conversations_order_id_fkey(order_type, requires_contact_exchange, is_hidden, hidden_reason)')
     .eq('id', convId)
     .single();
+
+  // VIP expired and the linked order got auto-hidden — lock sending only
+  // (reading history is unaffected, GET /:id/messages above has no such check).
+  if (conv?.orders?.is_hidden && conv.orders.hidden_reason === 'vip_expired') {
+    return res.status(403).json({ error: 'Чат заблокирован до продления VIP' });
+  }
 
   // Blocked users can still message in support chats but not in order chats
   if (conv?.type !== 'support_ticket') {

@@ -3,6 +3,7 @@ const auth    = require('../middleware/auth');
 const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
+const { getListingUsage } = require('../utils/listingLimit');
 
 const router = Router();
 
@@ -50,6 +51,11 @@ router.post('/', auth, isBanned, async (req, res) => {
   const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason, category } = req.body;
   const validationError = validateListing(req.body);
   if (validationError) return res.status(400).json({ error: validationError });
+
+  const { used, limit } = await getListingUsage(req.userId);
+  if (used >= limit) {
+    return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.` });
+  }
 
   const { data: listing, error } = await supabase.from('listings').insert({
     owner_id: req.userId,
@@ -99,7 +105,8 @@ router.get('/mine', auth, async (req, res) => {
     .eq('owner_id', req.userId)
     .order('created_at', { ascending: false });
   if (error) return serverError(res, error);
-  res.json(data ?? []);
+  const { used, limit } = await getListingUsage(req.userId);
+  res.json({ listings: data ?? [], usage: { used, limit } });
 });
 
 // ── GET /listings/:id ─────────────────────────────────────────────────────────
@@ -151,10 +158,18 @@ router.patch('/:id/toggle', auth, isBanned, async (req, res) => {
   if (!listing) return res.status(404).json({ error: 'Услуга не найдена' });
   if (listing.owner_id !== req.userId) return res.status(403).json({ error: 'Forbidden' });
 
+  const turningOn = !listing.is_active;
+  if (turningOn) {
+    const { used, limit } = await getListingUsage(req.userId);
+    if (used >= limit) {
+      return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте другое объявление или купите VIP.` });
+    }
+  }
+
   const { data: updated, error } = await supabase.from('listings')
-    .update({ is_active: !listing.is_active, updated_at: new Date().toISOString() })
+    .update({ is_active: turningOn, hidden_reason: turningOn ? null : 'owner', updated_at: new Date().toISOString() })
     .eq('id', req.params.id)
-    .select('id, is_active').single();
+    .select('id, is_active, hidden_reason').single();
   if (error) return serverError(res, error);
   res.json(updated);
 });

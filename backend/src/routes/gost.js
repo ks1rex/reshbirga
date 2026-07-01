@@ -41,18 +41,33 @@ router.post('/buy-tokens', auth, async (req, res) => {
   }
 
   try {
-    const { data: setting } = await supabase
-      .from('admin_settings')
-      .select('value')
-      .eq('key', 'gost_token_price')
-      .single();
-    const tokenPrice = parseFloat(setting?.value ?? '10');
-    const cost = token_amount * tokenPrice;
+    const [{ data: settings }, { data: profileVip }] = await Promise.all([
+      supabase
+        .from('admin_settings')
+        .select('key, value')
+        .in('key', ['gost_token_price', 'vip_token_discount_pct']),
+      supabase
+        .from('profiles')
+        .select('vip_expires_at')
+        .eq('id', req.userId)
+        .single(),
+    ]);
+    const num = (key, fallback) =>
+      parseFloat(settings?.find((s) => s.key === key)?.value ?? fallback);
+    const tokenPrice = num('gost_token_price', '10');
+    const isVip = !!profileVip?.vip_expires_at && new Date(profileVip.vip_expires_at) > new Date();
+    const discountPct = isVip ? num('vip_token_discount_pct', '0') : 0;
+    const baseCost = token_amount * tokenPrice;
+    const cost = Math.round(baseCost * (1 - discountPct / 100) * 100) / 100;
+    const meta = isVip && discountPct > 0
+      ? { vip_discount_applied: true, discount_pct: discountPct, base_price: baseCost, token_price: tokenPrice }
+      : { vip_discount_applied: false };
 
     const { error: rpcError } = await supabase.rpc('buy_gost_tokens', {
       p_user_id:     req.userId,
       p_token_amount: token_amount,
       p_rub_cost:    cost,
+      p_meta:        meta,
     });
 
     if (rpcError) {
