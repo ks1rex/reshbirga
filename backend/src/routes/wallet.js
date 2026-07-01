@@ -183,23 +183,13 @@ router.post('/vip', isBanned, async (req, res) => {
   if (!Number.isFinite(price) || !Number.isFinite(days))
     return res.status(500).json({ error: 'VIP не настроен (admin_settings)' });
 
-  const { data: ok, error: rpcErr } = await supabase
-    .rpc('purchase_vip', { p_user_id: req.userId, p_days: days, p_price: price });
+  const { data: rows, error: rpcErr } = await supabase
+    .rpc('purchase_vip', { p_user_id: req.userId, p_days: days, p_price: price, p_plan: req.body.plan });
   if (rpcErr) return serverError(res, rpcErr, 'wallet:vip:rpc');
-  if (!ok) return res.status(400).json({ error: 'Недостаточно средств на балансе' });
+  const result = rows?.[0];
+  if (!result?.success) return res.status(400).json({ error: 'Недостаточно средств на балансе' });
 
-  const { data: prof } = await supabase.from('profiles').select('vip_expires_at').eq('id', req.userId).single();
-
-  await supabase.from('transactions').insert({
-    user_id: req.userId,
-    type:    'vip_purchase',
-    amount:  price,
-    status:  'completed',
-    platform_profit: price,
-    meta:    { plan: req.body.plan, days },
-  });
-
-  res.json({ success: true, vip_expires_at: prof?.vip_expires_at ?? null });
+  res.json({ success: true, vip_expires_at: result.vip_expires_at });
 });
 
 module.exports = router;
