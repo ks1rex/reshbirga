@@ -186,20 +186,31 @@ async function run() {
       fail(4, 'POST /wallet/deposits', `status=${r.status} ${JSON.stringify(r.body)}`);
     }
 
-    // Admin confirms deposit
+    // Admin confirms deposit — credited 1:1, no commission (commission moved to withdrawal)
     const before = await getBalance(custId);
     const r2 = await api('POST', `/admin/deposits/${depositId}/confirm`, adminToken, { confirmed_amount: 1000 });
     if (r2.status === 200 && r2.body.credited_amount != null) {
       const after = await getBalance(custId);
       const credited = r2.body.credited_amount;
-      const expected = Math.round(1000 * 0.9 * 100) / 100;
+      const expected = 1000;
       if (Math.abs(credited - expected) < 0.01 && Math.abs(after - before - credited) < 0.01)
-        ok(4, `Admin confirmed: credited=${credited} ₽ (=1000×0.9), balance ${before}→${after}`);
+        ok(4, `Admin confirmed: credited=${credited} ₽ (=1000×1, no commission), balance ${before}→${after}`);
       else
         fail(4, 'Deposit credited_amount mismatch', `credited=${credited} expected=${expected} balance=${after}`);
     } else {
       fail(4, 'POST /admin/deposits/confirm', `status=${r2.status} ${JSON.stringify(r2.body)}`);
     }
+
+    // Deposit transaction should carry no platform profit
+    const { data: depTx } = await adminSupabase
+      .from('transactions')
+      .select('platform_profit')
+      .eq('user_id', custId).eq('type', 'deposit')
+      .order('created_at', { ascending: false }).limit(1).single();
+    if (depTx && Math.abs(parseFloat(depTx.platform_profit ?? 0)) < 0.01)
+      ok(4, `Deposit transaction platform_profit=0`);
+    else
+      fail(4, 'Deposit platform_profit should be 0', JSON.stringify(depTx));
   } catch (e) { fail(4, 'Deposit cycle', e.message); }
 
   // Top up balances directly for test reliability
@@ -415,6 +426,18 @@ async function run() {
         ok(13, 'Admin confirmed withdrawal');
       else
         fail(13, 'Admin confirm withdrawal', `status=${rc.status} ${JSON.stringify(rc.body)}`);
+
+      // Withdrawal transaction should hold 10% commission in platform_profit (amount stays full)
+      const { data: wTx } = await adminSupabase
+        .from('transactions')
+        .select('amount, platform_profit')
+        .eq('user_id', execId).eq('type', 'withdrawal')
+        .order('created_at', { ascending: false }).limit(1).single();
+      const expectedProfit = Math.round(300 * 0.1 * 100) / 100;
+      if (wTx && Math.abs(parseFloat(wTx.amount) - 300) < 0.01 && Math.abs(parseFloat(wTx.platform_profit ?? 0) - expectedProfit) < 0.01)
+        ok(13, `Withdrawal transaction: amount=${wTx.amount} ₽, platform_profit=${wTx.platform_profit} ₽ (10%)`);
+      else
+        fail(13, 'Withdrawal commission mismatch', JSON.stringify(wTx));
     } else {
       fail(13, 'POST /wallet/withdrawals', `status=${r.status} ${JSON.stringify(r.body)}`);
     }

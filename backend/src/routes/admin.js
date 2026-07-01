@@ -416,24 +416,24 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   if (!confirmedAmount || confirmedAmount <= 0 || isNaN(confirmedAmount))
     return res.status(400).json({ error: 'Некорректная сумма подтверждения' });
 
-  // Commission / referral parameters are admin-configurable via admin_settings;
-  // fall back to the documented defaults (10% / 5% / 100₽) if a row is missing
-  // or malformed so confirmation never breaks on bad config.
+  // Deposits are credited 1:1 — commission moved to withdrawal (see
+  // withdrawal_commission_pct). Referral parameters are still admin-configurable
+  // via admin_settings; fall back to the documented defaults (5% / 100₽) if a
+  // row is missing or malformed so confirmation never breaks on bad config.
   const { data: settingsRows } = await supabase
     .from('admin_settings')
     .select('key, value')
-    .in('key', ['deposit_commission_pct', 'referral_bonus_pct', 'referral_min_amount']);
+    .in('key', ['referral_bonus_pct', 'referral_min_amount']);
   const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
   const num = (key, fallback) => {
     const v = parseFloat(settings[key]);
     return Number.isFinite(v) ? v : fallback;
   };
-  const commissionPct = num('deposit_commission_pct', 10);
   const referralPct   = num('referral_bonus_pct', 5);
   const referralMin   = num('referral_min_amount', 100);
 
-  const creditedAmount    = Math.round(confirmedAmount * (1 - commissionPct / 100) * 100) / 100;
-  const platformGross     = Math.round(confirmedAmount * (commissionPct / 100) * 100) / 100;
+  const creditedAmount    = confirmedAmount;
+  const platformGross     = 0;
   const now               = new Date().toISOString();
 
   // Referrer lookup — the final bonus decision is made atomically below via
@@ -485,7 +485,8 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   }
 
   if (bonusApplied) {
-    // deposit_referral: platform keeps gross 10%; net 5% after referral payout
+    // deposit_referral: deposit itself carries no platform profit (commission moved
+    // to withdrawal); referral bonus is paid out of platform withdrawal profit, not this deposit.
     await supabase.from('transactions').insert({
       user_id:         dep.user_id,
       type:            'deposit_referral',
@@ -523,7 +524,7 @@ router.post('/deposits/:id/confirm', async (req, res) => {
       `Депозит: ${confirmedAmount} ₽ от @${userProfile?.nickname ?? dep.user_id}`
     );
   } else {
-    // Regular deposit: platform keeps full 10%
+    // Regular deposit: credited 1:1, no platform profit
     await supabase.from('transactions').insert({
       user_id:         dep.user_id,
       type:            'deposit',
@@ -594,8 +595,26 @@ router.post('/withdrawals/:id/confirm', async (req, res) => {
   if (!claimed || claimed.length === 0)
     return res.status(409).json({ error: 'Заявка уже обработана' });
 
-  // Balance was already deducted at withdrawal creation
-  await supabase.from('transactions').insert({ user_id: wr.user_id, type: 'withdrawal', amount: parseFloat(wr.amount), status: 'completed' });
+  // Commission is held on withdrawal now (deposits are credited 1:1). The actual
+  // payout to the user (amount × (1 − pct)) happens manually by the admin/bank —
+  // the reserved full `amount` was already deducted at withdrawal creation, and
+  // platform_profit here just records the commission for the finance summary.
+  const { data: settingRow } = await supabase
+    .from('admin_settings')
+    .select('value')
+    .eq('key', 'withdrawal_commission_pct')
+    .single();
+  const commissionPct = Number.isFinite(parseFloat(settingRow?.value)) ? parseFloat(settingRow.value) : 10;
+  const amount         = parseFloat(wr.amount);
+  const platformProfit = Math.round(amount * (commissionPct / 100) * 100) / 100;
+
+  await supabase.from('transactions').insert({
+    user_id:         wr.user_id,
+    type:            'withdrawal',
+    amount,
+    status:          'completed',
+    platform_profit: platformProfit,
+  });
 
   res.json({ success: true });
 });
@@ -831,7 +850,7 @@ router.get('/finance/summary', async (req, res) => {
   const [txRes, balRes, expRes] = await Promise.all([
     supabase.from('transactions')
       .select('type, amount, platform_profit')
-      .in('type', ['deposit', 'deposit_referral', 'referral_bonus', 'balance_to_token'])
+      .in('type', ['withdrawal', 'deposit_referral', 'referral_bonus', 'balance_to_token'])
       .eq('status', 'completed'),
     supabase.from('profiles').select('balance'),
     supabase.from('admin_settings').select('value').eq('key', 'platform_expenses').single(),
@@ -842,7 +861,8 @@ router.get('/finance/summary', async (req, res) => {
   const txs = txRes.data ?? [];
   const round2 = n => Math.round(n * 100) / 100;
 
-  const commission_regular    = round2(txs.filter(t => t.type === 'deposit').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
+  // Commission moved from deposit to withdrawal (see admin_settings.withdrawal_commission_pct)
+  const commission_regular    = round2(txs.filter(t => t.type === 'withdrawal').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
   const commission_referral   = round2(txs.filter(t => t.type === 'deposit_referral').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
   const referral_bonuses_paid = round2(txs.filter(t => t.type === 'referral_bonus').reduce((s, t) => s + parseFloat(t.amount ?? 0), 0));
   const gost_tokens_revenue   = round2(txs.filter(t => t.type === 'balance_to_token').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
