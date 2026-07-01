@@ -59,7 +59,7 @@ reshbirga/
 ### Требования
 
 - Node.js 20+
-- Проект Supabase (ref: `vmoyqhuxxmkceqmauujm`) с применёнными миграциями 0001–0023
+- Проект Supabase (ref: `btcpbvevytmhgkevhnyj`, общий с backend Sait/ГОСТ) с применёнными миграциями 0001–0027
 
 ### Frontend
 

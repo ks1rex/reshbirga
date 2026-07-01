@@ -2,7 +2,7 @@
  * Smoke test for СтудБиржа backend — balance-based order flow.
  * Covers: deposit cycle, order creation with instant deduction, auction refund_excess,
  *   awaiting_topup → topup, cancel open order, executor payout on completion, withdrawal,
- *   dispute resolve, support, ban.
+ *   VIP purchase (cumulative extension, insufficient balance), dispute resolve, support, ban.
  *
  * Prerequisites:
  *   - Backend running at BACKEND_URL (default http://localhost:3001)
@@ -465,22 +465,64 @@ async function run() {
     }
   } catch (e) { fail(14, 'Withdrawal reject', e.message); }
 
-  // ── Step 15: Dispute → resolve pay_executor ──────────────────────────────
-  console.log('\nStep 15 — Dispute and resolve pay_executor');
+  // ── Step 15: VIP purchase (deposit → buy → cumulative extend → insufficient balance) ──
+  console.log('\nStep 15 — VIP purchase cycle');
+  try {
+    await setBalance(custId, 1000);
+    const balBefore = await getBalance(custId);
+
+    const r1 = await api('POST', '/wallet/vip', custToken, { plan: 'month' });
+    if (r1.status === 200 && r1.body.vip_expires_at) {
+      const balAfter1 = await getBalance(custId);
+      const deducted = Math.round((balBefore - balAfter1) * 100) / 100;
+      const expiresAt1 = new Date(r1.body.vip_expires_at);
+      const daysLeft1 = (expiresAt1 - Date.now()) / 86400000;
+      if (Math.abs(deducted - 300) < 0.01 && daysLeft1 > 29 && daysLeft1 < 31)
+        ok(15, `VIP month purchased: -${deducted} ₽, expires in ~${daysLeft1.toFixed(1)}d`);
+      else
+        fail(15, 'VIP first purchase mismatch', `deducted=${deducted} daysLeft=${daysLeft1}`);
+
+      // Second purchase — should extend cumulatively from the existing expiry, not from now()
+      const r2 = await api('POST', '/wallet/vip', custToken, { plan: 'month' });
+      if (r2.status === 200 && r2.body.vip_expires_at) {
+        const expiresAt2 = new Date(r2.body.vip_expires_at);
+        const daysLeft2 = (expiresAt2 - Date.now()) / 86400000;
+        if (daysLeft2 > 59 && daysLeft2 < 61)
+          ok(15, `VIP extended cumulatively: ~${daysLeft2.toFixed(1)}d left (≈60d total)`);
+        else
+          fail(15, 'VIP cumulative extension mismatch', `daysLeft=${daysLeft2} expected~60`);
+      } else {
+        fail(15, 'Second VIP purchase', `status=${r2.status} ${JSON.stringify(r2.body)}`);
+      }
+    } else {
+      fail(15, 'First VIP purchase', `status=${r1.status} ${JSON.stringify(r1.body)}`);
+    }
+
+    // Insufficient balance → rejected, no partial effect
+    await setBalance(custId, 100);
+    const r3 = await api('POST', '/wallet/vip', custToken, { plan: 'year' });
+    if (r3.status === 400)
+      ok(15, 'VIP purchase without sufficient balance → 400');
+    else
+      fail(15, 'VIP insufficient balance should reject', `status=${r3.status} ${JSON.stringify(r3.body)}`);
+  } catch (e) { fail(15, 'VIP purchase cycle', e.message); }
+
+  // ── Step 16: Dispute → resolve pay_executor ──────────────────────────────
+  console.log('\nStep 16 — Dispute and resolve pay_executor');
   try {
     await setBalance(custId, 5000);
     const ro = await api('POST', '/orders', custToken, {
       title: 'Smoke спор', description: '...', subject: 'Право',
       order_type: 'order', base_amount: 300,
     });
-    if (ro.status !== 201) { fail(15, 'Create order for dispute', JSON.stringify(ro.body)); }
+    if (ro.status !== 201) { fail(16, 'Create order for dispute', JSON.stringify(ro.body)); }
     else {
       const dispOrderId = ro.body.id;
       const reserved = parseFloat(ro.body.reserved_amount);
 
       const ra = await api('POST', `/orders/${dispOrderId}/apply`, execToken, { message: 'Сделаю', proposed_amount: 300 });
       const rsel = await api('POST', `/orders/${dispOrderId}/applications/${ra.body.id}/select`, custToken, {});
-      if (rsel.body.status !== 'in_progress') { fail(15, 'Setup dispute order', JSON.stringify(rsel.body)); }
+      if (rsel.body.status !== 'in_progress') { fail(16, 'Setup dispute order', JSON.stringify(rsel.body)); }
       else {
         const rd = await api('POST', `/orders/${dispOrderId}/dispute`, custToken, { reason: 'Smoke тест спора' });
         if (rd.status === 200) {
@@ -495,40 +537,40 @@ async function run() {
               const execBalAfter = await getBalance(execId);
               const gained = Math.round((execBalAfter - execBalBefore) * 100) / 100;
               if (Math.abs(gained - 300) < 0.01)
-                ok(15, `Dispute resolved pay_executor, executor +${gained} ₽`);
+                ok(16, `Dispute resolved pay_executor, executor +${gained} ₽`);
               else
-                fail(15, 'Dispute pay_executor amount', `gained=${gained} expected=300`);
+                fail(16, 'Dispute pay_executor amount', `gained=${gained} expected=300`);
             } else {
-              fail(15, 'Resolve dispute', `status=${rr.status} ${JSON.stringify(rr.body)}`);
+              fail(16, 'Resolve dispute', `status=${rr.status} ${JSON.stringify(rr.body)}`);
             }
           } else {
-            fail(15, 'Dispute not found in list', `order=${dispOrderId}`);
+            fail(16, 'Dispute not found in list', `order=${dispOrderId}`);
           }
         } else {
-          fail(15, 'Open dispute', `status=${rd.status} ${JSON.stringify(rd.body)}`);
+          fail(16, 'Open dispute', `status=${rd.status} ${JSON.stringify(rd.body)}`);
         }
       }
     }
-  } catch (e) { fail(15, 'Dispute flow', e.message); }
+  } catch (e) { fail(16, 'Dispute flow', e.message); }
 
-  // ── Step 16: Support ticket ───────────────────────────────────────────────
-  console.log('\nStep 16 — Support ticket');
+  // ── Step 17: Support ticket ───────────────────────────────────────────────
+  console.log('\nStep 17 — Support ticket');
   try {
     const r = await api('POST', '/support/tickets', custToken, { subject: 'Smoke тикет', message: 'Тестовое сообщение поддержки' });
     if (r.status === 201 && (r.body.id || r.body.ticket_id)) {
       ticketId = r.body.ticket_id ?? r.body.id;
-      ok(16, `Ticket created id=${ticketId}`);
+      ok(17, `Ticket created id=${ticketId}`);
 
       const rc = await api('PATCH', `/admin/support/tickets/${ticketId}/close`, adminToken, {});
-      if (rc.status === 200) ok(16, 'Ticket closed by admin');
-      else fail(16, 'Close ticket', `status=${rc.status}`);
+      if (rc.status === 200) ok(17, 'Ticket closed by admin');
+      else fail(17, 'Close ticket', `status=${rc.status}`);
     } else {
-      fail(16, 'Create ticket', `status=${r.status} ${JSON.stringify(r.body)}`);
+      fail(17, 'Create ticket', `status=${r.status} ${JSON.stringify(r.body)}`);
     }
-  } catch (e) { fail(16, 'Support ticket', e.message); }
+  } catch (e) { fail(17, 'Support ticket', e.message); }
 
-  // ── Step 17: Ban / unban user ─────────────────────────────────────────────
-  console.log('\nStep 17 — Ban and unban user');
+  // ── Step 18: Ban / unban user ─────────────────────────────────────────────
+  console.log('\nStep 18 — Ban and unban user');
   try {
     const rb = await api('PATCH', `/admin/users/${custId}`, adminToken, { is_banned: true });
     if (rb.status === 200) {
@@ -537,17 +579,17 @@ async function run() {
         title: 'Smoke бан', description: '...', subject: 'X', order_type: 'fixed_price', base_amount: 100,
       });
       if (rord.status === 403)
-        ok(17, 'Banned user → 403 on protected route');
+        ok(18, 'Banned user → 403 on protected route');
       else
-        fail(17, 'Ban check', `expected 403 got ${rord.status}`);
+        fail(18, 'Ban check', `expected 403 got ${rord.status}`);
 
       const ru = await api('PATCH', `/admin/users/${custId}`, adminToken, { is_banned: false });
-      if (ru.status === 200) ok(17, 'User unbanned');
-      else fail(17, 'Unban', `status=${ru.status}`);
+      if (ru.status === 200) ok(18, 'User unbanned');
+      else fail(18, 'Unban', `status=${ru.status}`);
     } else {
-      fail(17, 'Ban user', `status=${rb.status}`);
+      fail(18, 'Ban user', `status=${rb.status}`);
     }
-  } catch (e) { fail(17, 'Ban/unban', e.message); }
+  } catch (e) { fail(18, 'Ban/unban', e.message); }
 
   summary();
 }

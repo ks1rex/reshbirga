@@ -1,6 +1,6 @@
 # Database Schema
 
-Supabase Postgres, RLS on. Migrations in `supabase/migrations/0001`..`0025` (+ `0024b`) are sequential and already applied to the live project (`vmoyqhuxxmkceqmauujm`). Add a new numbered file rather than editing an old one — treat them as ordered history. `supabase/migrations-ebu/` is a separate, apparently-unapplied/parked migration set — don't assume it's live.
+Supabase Postgres, RLS on. Migrations in `supabase/migrations/0001`..`0027` (+ `0024b`) are sequential and already applied to the live project (`btcpbvevytmhgkevhnyj` — shared with the Sait/ГОСТ backend, see root `CLAUDE.md`). Add a new numbered file rather than editing an old one — treat them as ordered history. `supabase/migrations-ebu/` is a separate, apparently-unapplied/parked migration set — don't assume it's live. Note: `0017_wallet_webhooks.sql` hardcodes a different, stale project ref in its edge-function URL and its trigger/function were not found live on `btcpbvevytmhgkevhnyj` — the deposit/withdrawal Telegram webhook from that migration appears to have never actually been wired up here; verify before relying on it.
 
 Exact columns/constraints live in the migration files; this is a table-of-contents, not a column dump.
 

@@ -11,7 +11,7 @@ router.use(auth);
 router.get('/', async (req, res) => {
   const [profileRes, depositsRes, withdrawalsRes] = await Promise.all([
     supabase.from('profiles')
-      .select('balance, referral_code, referral_earnings, referral_registered_count')
+      .select('balance, referral_code, referral_earnings, referral_registered_count, vip_expires_at')
       .eq('id', req.userId).single(),
     supabase.from('deposit_requests')
       .select('id, claimed_amount, confirmed_amount, credited_amount, status, admin_comment, created_at')
@@ -37,6 +37,7 @@ router.get('/', async (req, res) => {
     referral_link: referralCode ? `${frontendBase}/register?ref=${referralCode}` : null,
     referral_earnings: parseFloat(prof?.referral_earnings ?? 0),
     referral_registered_count: prof?.referral_registered_count ?? 0,
+    vip_expires_at: prof?.vip_expires_at ?? null,
     recent_deposits: depositsRes.data ?? [],
     recent_withdrawals: withdrawalsRes.data ?? [],
   });
@@ -162,6 +163,43 @@ router.post('/withdrawals', isBanned, async (req, res) => {
     return serverError(res, error);
   }
   res.status(201).json(data);
+});
+
+const VIP_PLANS = { month: { priceKey: 'vip_price_month', daysKey: 'vip_duration_month_days' },
+                    year:  { priceKey: 'vip_price_year',  daysKey: 'vip_duration_year_days'  } };
+
+// POST /wallet/vip — buy/extend VIP (plan: 'month' | 'year')
+router.post('/vip', isBanned, async (req, res) => {
+  const plan = VIP_PLANS[req.body.plan];
+  if (!plan) return res.status(400).json({ error: 'Некорректный план (month/year)' });
+
+  const { data: settingsRows } = await supabase
+    .from('admin_settings')
+    .select('key, value')
+    .in('key', [plan.priceKey, plan.daysKey]);
+  const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
+  const price = parseFloat(settings[plan.priceKey]);
+  const days  = parseInt(settings[plan.daysKey]);
+  if (!Number.isFinite(price) || !Number.isFinite(days))
+    return res.status(500).json({ error: 'VIP не настроен (admin_settings)' });
+
+  const { data: ok, error: rpcErr } = await supabase
+    .rpc('purchase_vip', { p_user_id: req.userId, p_days: days, p_price: price });
+  if (rpcErr) return serverError(res, rpcErr, 'wallet:vip:rpc');
+  if (!ok) return res.status(400).json({ error: 'Недостаточно средств на балансе' });
+
+  const { data: prof } = await supabase.from('profiles').select('vip_expires_at').eq('id', req.userId).single();
+
+  await supabase.from('transactions').insert({
+    user_id: req.userId,
+    type:    'vip_purchase',
+    amount:  price,
+    status:  'completed',
+    platform_profit: price,
+    meta:    { plan: req.body.plan, days },
+  });
+
+  res.json({ success: true, vip_expires_at: prof?.vip_expires_at ?? null });
 });
 
 module.exports = router;
