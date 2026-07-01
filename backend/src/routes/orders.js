@@ -122,7 +122,7 @@ router.post('/', auth, isBanned, async (req, res) => {
 
   const { used, limit } = await getListingUsage(req.userId);
   if (used >= limit) {
-    return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.` });
+    return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.`, code: 'LISTING_LIMIT_REACHED' });
   }
 
   // No platform commission on orders — 1:1 balance transfer
@@ -180,7 +180,7 @@ router.patch('/:id/visibility', auth, isBanned, async (req, res) => {
   if (!hidden) {
     const { used, limit } = await getListingUsage(req.userId);
     if (used >= limit) {
-      return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте другое объявление или купите VIP.` });
+      return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте другое объявление или купите VIP.`, code: 'LISTING_LIMIT_REACHED' });
     }
   }
 

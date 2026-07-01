@@ -54,7 +54,7 @@ router.post('/', auth, isBanned, async (req, res) => {
 
   const { used, limit } = await getListingUsage(req.userId);
   if (used >= limit) {
-    return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.` });
+    return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.`, code: 'LISTING_LIMIT_REACHED' });
   }
 
   const { data: listing, error } = await supabase.from('listings').insert({
@@ -162,7 +162,7 @@ router.patch('/:id/toggle', auth, isBanned, async (req, res) => {
   if (turningOn) {
     const { used, limit } = await getListingUsage(req.userId);
     if (used >= limit) {
-      return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте другое объявление или купите VIP.` });
+      return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте другое объявление или купите VIP.`, code: 'LISTING_LIMIT_REACHED' });
     }
   }
 

@@ -64,7 +64,7 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   // VIP expired and the linked order got auto-hidden — lock sending only
   // (reading history is unaffected, GET /:id/messages above has no such check).
   if (conv?.orders?.is_hidden && conv.orders.hidden_reason === 'vip_expired') {
-    return res.status(403).json({ error: 'Чат заблокирован до продления VIP' });
+    return res.status(403).json({ error: 'Чат заблокирован до продления VIP', code: 'VIP_EXPIRED_CHAT_LOCKED' });
   }
 
   // Blocked users can still message in support chats but not in order chats
