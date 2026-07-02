@@ -758,7 +758,7 @@ router.get('/conversations', async (req, res) => {
     .select(`
       id, type, created_at, order_id, support_ticket_id,
       orders!conversations_order_id_fkey(id, title),
-      support_tickets!conversations_support_ticket_id_fkey(id, subject),
+      support_tickets!conversations_support_ticket_id_fkey(id, subject, status),
       conversation_participants(user_id, profiles!conversation_participants_user_id_fkey(id, nickname))
     `, { count: 'exact' })
     .order('created_at', { ascending: false })
@@ -797,6 +797,7 @@ router.get('/conversations', async (req, res) => {
     support_ticket_id:  c.support_ticket_id,
     order_title:        c.orders?.title ?? null,
     ticket_subject:     c.support_tickets?.subject ?? null,
+    status:             c.support_tickets?.status ?? null,
     participants:       (c.conversation_participants ?? []).map(p => p.profiles ?? { id: p.user_id, nickname: '?' }),
     last_message:       lastMessages[c.id]
       ? { content: lastMessages[c.id].content, created_at: lastMessages[c.id].created_at, sender_nickname: lastMessages[c.id].sender?.nickname ?? 'Система' }
