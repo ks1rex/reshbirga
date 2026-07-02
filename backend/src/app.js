@@ -16,8 +16,10 @@ const profileRouter        = require('./routes/profile');
 const forumRouter          = require('./routes/forum');
 const gostRouter           = require('./routes/gost');
 const statsRouter          = require('./routes/stats');
+const scheduleRouter       = require('./routes/schedule');
 const { startForumAIJob }  = require('./utils/forumModerator');
 const { startVipExpiryJob } = require('./utils/vipExpiry');
+const { startScheduleRefreshJob } = require('./jobs/scheduleRefresh');
 
 const app = express();
 
@@ -67,12 +69,16 @@ app.use('/profile',        profileRouter);
 app.use('/forum',          forumRouter);
 app.use('/gost',           gostRouter);
 app.use('/stats',          statsRouter);
+app.use('/schedule',       scheduleRouter);
 
 // Start background AI forum moderation (fire-and-forget, every 10 min)
 startForumAIJob();
 
 // Start background VIP-expiry enforcement (fire-and-forget, every hour)
 startVipExpiryJob();
+
+// Start background schedule cache refresh (fire-and-forget, every hour)
+startScheduleRefreshJob();
 
 // 404 for unmatched routes
 app.use((req, res) => {
