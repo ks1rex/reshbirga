@@ -6,31 +6,31 @@ const { serverError } = require('../utils/httpError');
 
 const GUBKIN_API = 'https://lk.gubkin.ru/schedule/api/api.php';
 const DEFAULT_STUDY_ID = 62;
+const NOT_READY = { error: 'Данные ещё не загружены. Попробуйте через несколько минут.' };
 
-async function getCached(key, ttlHours, fetchFn) {
-  const { data: cached } = await supabase
+// Render is geo-blocked from lk.gubkin.ru, so these GET routes only ever read
+// what a GitHub Actions job (running from a non-blocked IP) already pushed
+// into schedule_cache via /prefetch — no live proxying happens here.
+async function readCache(key) {
+  const { data } = await supabase
     .from('schedule_cache')
-    .select('data, expires_at')
+    .select('data')
     .eq('cache_key', key)
     .gt('expires_at', new Date().toISOString())
     .single();
-
-  if (cached) {
-    await supabase.from('schedule_cache')
-      .update({ last_accessed: new Date().toISOString() })
-      .eq('cache_key', key);
-    return cached.data;
+  if (data) {
+    supabase.from('schedule_cache').update({ last_accessed: new Date().toISOString() }).eq('cache_key', key).then(() => {});
   }
+  return data?.data ?? null;
+}
 
-  const freshData = await fetchFn();
+async function writeCache(key, data, ttlHours) {
   await supabase.from('schedule_cache').upsert({
     cache_key: key,
-    data: freshData,
+    data,
     expires_at: new Date(Date.now() + ttlHours * 3600000).toISOString(),
     last_accessed: new Date().toISOString(),
   }, { onConflict: 'cache_key' });
-
-  return freshData;
 }
 
 async function gubkinFetch(params) {
@@ -41,12 +41,19 @@ async function gubkinFetch(params) {
   return body.rows;
 }
 
+function requireServiceKey(req, res, next) {
+  if (req.headers['x-service-key'] !== process.env.SERVICE_SCHEDULE_KEY) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+}
+
 // GET /schedule/faculties
 router.get('/faculties', async (req, res) => {
   try {
-    const rows = await getCached('faculties', 24, () =>
-      gubkinFetch({ act: 'list', method: 'getFaculties' }));
-    res.json(rows);
+    const data = await readCache('faculties');
+    if (!data) return res.status(503).json(NOT_READY);
+    res.json(data);
   } catch (err) {
     serverError(res, err, 'schedule/faculties');
   }
@@ -57,33 +64,60 @@ router.get('/groups', async (req, res) => {
   const { facultyId } = req.query;
   if (!facultyId) return res.status(400).json({ error: 'Укажите facultyId' });
   try {
-    const rows = await getCached(`groups_${facultyId}`, 24, () =>
-      gubkinFetch({ act: 'list', method: 'getFacultyGroups', facultyId }));
-    rows.sort((a, b) => (a.code ?? '').localeCompare(b.code ?? ''));
-    res.json(rows);
+    const data = await readCache(`groups_${facultyId}`);
+    if (!data) return res.status(503).json(NOT_READY);
+    res.json(data);
   } catch (err) {
     serverError(res, err, 'schedule/groups');
   }
 });
 
-// GET /schedule/lessons?groupId=X&date=DD-M-YYYY&studyId=Y
+// GET /schedule/lessons?groupId=X&date=DD-M-YYYY
 router.get('/lessons', async (req, res) => {
-  const { groupId, date, studyId = DEFAULT_STUDY_ID } = req.query;
+  const { groupId, date } = req.query;
   if (!groupId || !date) return res.status(400).json({ error: 'Укажите groupId и date' });
   try {
-    const cacheKey = `schedule_${groupId}_${date}_${studyId}`;
-    const data = await getCached(cacheKey, 1, async () => {
-      const rows = await gubkinFetch({ act: 'schedule', date, groupId, studyId });
-      const moscow = rows.organizations.find(o => o.id === 0);
-      return {
-        week: rows.week.weekRussia,
-        timeChunks: moscow?.lessonsTimeChunks ?? [],
-        lessons: moscow?.lessons ?? [],
-      };
-    });
+    const data = await readCache(`schedule_${groupId}_${date}`);
+    if (!data) return res.status(503).json(NOT_READY);
     res.json(data);
   } catch (err) {
     serverError(res, err, 'schedule/lessons');
+  }
+});
+
+// POST /schedule/prefetch — called only by the GitHub Actions cache job
+router.post('/prefetch', requireServiceKey, async (req, res) => {
+  const { groupId, date, studyId = DEFAULT_STUDY_ID } = req.body;
+  if (!groupId || !date) return res.status(400).json({ error: 'Укажите groupId и date' });
+  try {
+    const rows = await gubkinFetch({ act: 'schedule', date, groupId, studyId });
+    const moscow = rows.organizations?.[0];
+    const data = {
+      week: rows.week?.weekRussia,
+      timeChunks: moscow?.lessonsTimeChunks ?? [],
+      lessons: moscow?.lessons ?? [],
+    };
+    await writeCache(`schedule_${groupId}_${date}`, data, 1);
+    res.json({ success: true });
+  } catch (err) {
+    serverError(res, err, 'schedule/prefetch');
+  }
+});
+
+// POST /schedule/prefetch-meta — called only by the GitHub Actions cache job
+router.post('/prefetch-meta', requireServiceKey, async (req, res) => {
+  try {
+    const faculties = await gubkinFetch({ act: 'list', method: 'getFaculties' });
+    await writeCache('faculties', faculties, 24);
+
+    for (const f of faculties ?? []) {
+      const groups = await gubkinFetch({ act: 'list', method: 'getFacultyGroups', facultyId: f.id });
+      groups.sort((a, b) => (a.code ?? '').localeCompare(b.code ?? ''));
+      await writeCache(`groups_${f.id}`, groups, 24);
+    }
+    res.json({ success: true, faculties: faculties?.length ?? 0 });
+  } catch (err) {
+    serverError(res, err, 'schedule/prefetch-meta');
   }
 });
 

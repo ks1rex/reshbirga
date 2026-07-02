@@ -19,7 +19,6 @@ const statsRouter          = require('./routes/stats');
 const scheduleRouter       = require('./routes/schedule');
 const { startForumAIJob }  = require('./utils/forumModerator');
 const { startVipExpiryJob } = require('./utils/vipExpiry');
-const { startScheduleRefreshJob } = require('./jobs/scheduleRefresh');
 
 const app = express();
 
@@ -76,9 +75,6 @@ startForumAIJob();
 
 // Start background VIP-expiry enforcement (fire-and-forget, every hour)
 startVipExpiryJob();
-
-// Start background schedule cache refresh (fire-and-forget, every hour)
-startScheduleRefreshJob();
 
 // 404 for unmatched routes
 app.use((req, res) => {
