@@ -6,6 +6,7 @@ const { serverError } = require('../utils/httpError');
 const { sanitizeSearchTerm } = require('../utils/search');
 const { sendTelegram } = require('../utils/telegramNotify');
 const { grantAchievement } = require('../utils/reputation');
+const scheduleWarmup = require('../jobs/scheduleWarmup');
 
 const router = Router();
 router.use(auth, adminMiddleware);
@@ -1111,6 +1112,40 @@ router.delete('/forum/categories/:id', async (req, res) => {
   const { error } = await supabase.from('forum_categories').delete().eq('id', req.params.id);
   if (error) return serverError(res, error);
   res.json({ success: true });
+});
+
+// GET /admin/schedule-warmup/status
+router.get('/schedule-warmup/status', async (req, res) => {
+  const state = await scheduleWarmup.getState();
+  res.json(state);
+});
+
+// POST /admin/schedule-warmup/start
+router.post('/schedule-warmup/start', async (req, res) => {
+  const state = await scheduleWarmup.getState();
+  if (state?.status === 'running' || state?.status === 'waiting_captcha') {
+    return res.status(400).json({ error: 'Уже выполняется' });
+  }
+  scheduleWarmup.startWarmup(); // не ждём завершения
+  res.json({ started: true });
+});
+
+// POST /admin/schedule-warmup/solve-captcha  { answer }
+router.post('/schedule-warmup/solve-captcha', async (req, res) => {
+  const { answer } = req.body;
+  if (!answer) return res.status(400).json({ error: 'Укажите answer' });
+  try {
+    const result = await scheduleWarmup.submitCaptchaAndContinue(answer);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /admin/schedule-warmup/cancel
+router.post('/schedule-warmup/cancel', async (req, res) => {
+  scheduleWarmup.cancelWarmup();
+  res.json({ cancelled: true });
 });
 
 module.exports = router;
