@@ -12,14 +12,22 @@ const GUBKIN_HEADERS = {
 let shouldCancel = false;
 
 async function getFreshCaptcha() {
-  const res = await fetch(`${GUBKIN_API}?act=Captcha&method=generateCaptcha`, { headers: GUBKIN_HEADERS });
-  const match = res.headers.get('set-cookie')?.match(/PHPSESSID=([^;]+)/);
-  if (!match) throw new Error('No PHPSESSID from captcha request');
-  const buffer = await res.arrayBuffer();
-  return {
-    cookie: match[1],
-    imageBase64: `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`,
-  };
+  const url = `${GUBKIN_API}?act=Captcha&method=generateCaptcha`;
+  console.log('[Warmup] Fetching:', url);
+  try {
+    const res = await fetch(url, { headers: GUBKIN_HEADERS });
+    const match = res.headers.get('set-cookie')?.match(/PHPSESSID=([^;]+)/);
+    if (!match) throw new Error('No PHPSESSID from captcha request');
+    const buffer = await res.arrayBuffer();
+    console.log('[Warmup] Fetched:', url);
+    return {
+      cookie: match[1],
+      imageBase64: `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`,
+    };
+  } catch (e) {
+    console.error('[Warmup] Fetch error details:', { message: e.message, cause: e.cause, code: e.cause?.code });
+    throw e;
+  }
 }
 
 async function validateCaptcha(cookie, answer) {
@@ -35,17 +43,24 @@ async function validateCaptcha(cookie, answer) {
 async function gubkinFetch(cookie, params) {
   const url = new URL(GUBKIN_API);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const res = await fetch(url.toString(), {
-    headers: { ...GUBKIN_HEADERS, 'Host': 'lk.gubkin.ru', 'Accept': 'application/json, text/plain, */*', 'Cookie': `PHPSESSID=${cookie}` },
-    signal: AbortSignal.timeout(15000),
-  });
-  const data = JSON.parse(await res.text());
-  if (!data.state) {
-    const err = new Error(data.reason || 'Gubkin API error');
-    if (data.reason?.includes('капч')) err.isCaptcha = true;
-    throw err;
+  console.log('[Warmup] Fetching:', url.toString());
+  try {
+    const res = await fetch(url.toString(), {
+      headers: { ...GUBKIN_HEADERS, 'Host': 'lk.gubkin.ru', 'Accept': 'application/json, text/plain, */*', 'Cookie': `PHPSESSID=${cookie}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    const data = JSON.parse(await res.text());
+    console.log('[Warmup] Fetched:', url.toString());
+    if (!data.state) {
+      const err = new Error(data.reason || 'Gubkin API error');
+      if (data.reason?.includes('капч')) err.isCaptcha = true;
+      throw err;
+    }
+    return data;
+  } catch (e) {
+    console.error('[Warmup] Fetch error details:', { message: e.message, cause: e.cause, code: e.cause?.code });
+    throw e;
   }
-  return data;
 }
 
 async function updateState(patch) {
@@ -89,6 +104,7 @@ async function startWarmup() {
     const { cookie, imageBase64 } = await getFreshCaptcha();
     await updateState({ status: 'waiting_captcha', session_cookie: cookie, captcha_image_base64: imageBase64 });
   } catch (e) {
+    console.error('[Warmup ERROR]', { message: e.message, stack: e.stack, name: e.name, cause: e.cause });
     await updateState({ status: 'error', last_error: e.message });
   }
 }
@@ -170,6 +186,7 @@ async function runFullWarmup(cookie) {
     await updateState({ status: 'done', last_run_at: new Date().toISOString() });
     console.log(`[Warmup] Done! Success: ${success}, Errors: ${errors}`);
   } catch (e) {
+    console.error('[Warmup ERROR]', { message: e.message, stack: e.stack, name: e.name, cause: e.cause });
     await updateState({ status: 'error', last_error: e.message });
   }
 }
