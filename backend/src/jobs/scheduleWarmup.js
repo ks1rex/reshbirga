@@ -12,18 +12,46 @@ const GUBKIN_HEADERS = {
 let shouldCancel = false;
 
 async function getFreshCaptcha() {
-  const url = `${GUBKIN_API}?act=Captcha&method=generateCaptcha`;
-  console.log('[Warmup] Fetching:', url);
   try {
-    const res = await fetch(url, { headers: GUBKIN_HEADERS });
-    const match = res.headers.get('set-cookie')?.match(/PHPSESSID=([^;]+)/);
-    if (!match) throw new Error('No PHPSESSID from captcha request');
-    const buffer = await res.arrayBuffer();
-    console.log('[Warmup] Fetched:', url);
-    return {
-      cookie: match[1],
-      imageBase64: `data:image/jpeg;base64,${Buffer.from(buffer).toString('base64')}`,
-    };
+    // Шаг 1: заходим на главную страницу — получаем первичную куку сессии
+    console.log('[Warmup] Step 1: getting session from main page');
+
+    const pageRes = await fetch('https://lk.gubkin.ru/schedule/', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+
+    const pageCookies = pageRes.headers.get('set-cookie');
+    const pageMatch = pageCookies?.match(/PHPSESSID=([^;]+)/);
+    if (!pageMatch) throw new Error('No PHPSESSID from main page request');
+    const cookie = pageMatch[1];
+    console.log('[Warmup] Got session cookie:', cookie);
+
+    // Шаг 2: запрашиваем картинку капчи с этой же кукой
+    console.log('[Warmup] Step 2: fetching captcha image');
+
+    const captchaUrl = `${GUBKIN_API}?act=Captcha&method=generateCaptcha`;
+    const captchaRes = await fetch(captchaUrl, {
+      headers: {
+        'Referer': 'https://lk.gubkin.ru/schedule/',
+        'Host': 'lk.gubkin.ru',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Cookie': `PHPSESSID=${cookie}`,
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!captchaRes.ok) throw new Error(`Captcha request failed: HTTP ${captchaRes.status}`);
+
+    const buffer = await captchaRes.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString('base64');
+    console.log('[Warmup] Captcha image received, size:', buffer.byteLength);
+
+    return { cookie, imageBase64: `data:image/jpeg;base64,${base64}` };
   } catch (e) {
     console.error('[Warmup] Fetch error details:', { message: e.message, cause: e.cause, code: e.cause?.code });
     throw e;
@@ -35,6 +63,7 @@ async function validateCaptcha(cookie, answer) {
     method: 'POST',
     headers: { ...GUBKIN_HEADERS, 'Content-Type': 'application/json', 'Cookie': `PHPSESSID=${cookie}` },
     body: JSON.stringify({ key: answer }),
+    signal: AbortSignal.timeout(15000),
   });
   const data = await res.json();
   return data.state === true;
