@@ -3,6 +3,7 @@ const auth = require('../middleware/auth');
 const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
+const { sendTelegram } = require('../utils/telegramNotify');
 
 const router = Router();
 router.use(auth);
@@ -105,6 +106,10 @@ router.post('/deposits', isBanned, async (req, res) => {
       return res.status(429).json({ error: 'Превышен лимит запросов на пополнение (3 в час), попробуйте позже.' });
     return serverError(res, error, 'wallet:deposit:create');
   }
+
+  const { data: prof } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
+  sendTelegram(`💰 Заявка на пополнение\nПользователь: @${prof?.nickname ?? req.userId}\nСумма: ${claimed_amount} ₽`);
+
   res.status(201).json(data);
 });
 
@@ -162,6 +167,10 @@ router.post('/withdrawals', isBanned, async (req, res) => {
     await supabase.rpc('add_wallet_balance', { p_user_id: req.userId, p_amount: amount });
     return serverError(res, error);
   }
+
+  const { data: prof } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
+  sendTelegram(`💸 Заявка на вывод\nПользователь: @${prof?.nickname ?? req.userId}\nСумма: ${amount} ₽ на карту ${card_number}`);
+
   res.status(201).json(data);
 });
 

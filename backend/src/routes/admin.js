@@ -251,7 +251,7 @@ router.get('/stats', async (req, res) => {
     completedRes,
     openDisputesRes,
     openTicketsRes,
-    confirmedDepositsRes,
+    withdrawalCommissionRes,
   ] = await Promise.all([
     supabase.from('profiles').select('id', { count: 'exact', head: true }),
     supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('is_banned', true),
@@ -259,10 +259,14 @@ router.get('/stats', async (req, res) => {
     supabase.from('orders').select('final_amount, base_amount').eq('status', 'completed').limit(2000),
     supabase.from('disputes').select('id', { count: 'exact', head: true }).eq('status', 'open'),
     supabase.from('support_tickets').select('id', { count: 'exact', head: true }).in('status', ['open', 'answered']),
-    supabase.from('deposit_requests').select('confirmed_amount, credited_amount').eq('status', 'confirmed').limit(2000),
+    // Commission moved from deposit to withdrawal (stage 1) — deposits are 1:1 now,
+    // so confirmed_amount - credited_amount on deposit_requests is always 0. Source
+    // from transactions.platform_profit on completed withdrawals instead, matching
+    // /admin/finance/summary's commission_regular.
+    supabase.from('transactions').select('platform_profit').eq('type', 'withdrawal').eq('status', 'completed').limit(2000),
   ]);
 
-  const errs = [totalUsersRes, bannedUsersRes, ordersRawRes, completedRes, openDisputesRes, openTicketsRes, confirmedDepositsRes]
+  const errs = [totalUsersRes, bannedUsersRes, ordersRawRes, completedRes, openDisputesRes, openTicketsRes, withdrawalCommissionRes]
     .map((r, i) => r.error ? `[${i}] ${r.error.message}` : null).filter(Boolean);
   if (errs.length) console.error('[admin/stats] query errors:', errs.join(' | '));
 
@@ -273,8 +277,8 @@ router.get('/stats', async (req, res) => {
 
   const completed = completedRes.data ?? [];
   const total_commission_earned = Math.round(
-    (confirmedDepositsRes.data ?? []).reduce(
-      (s, d) => s + (parseFloat(d.confirmed_amount ?? 0) - parseFloat(d.credited_amount ?? 0)), 0
+    (withdrawalCommissionRes.data ?? []).reduce(
+      (s, t) => s + parseFloat(t.platform_profit ?? 0), 0
     ) * 100
   ) / 100;
   const total_volume = Math.round(
