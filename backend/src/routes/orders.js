@@ -12,6 +12,7 @@ const { makeUploader } = require('../utils/upload');
 const { sanitizeSearchTerm } = require('../utils/search');
 const { addReputation, grantAchievement } = require('../utils/reputation');
 const { getListingUsage } = require('../utils/listingLimit');
+const { withIsVip } = require('../utils/vip');
 
 const router = Router();
 const upload = makeUploader();
@@ -32,8 +33,8 @@ const AUTO_CONFIRM_HOURS = parseFloat(process.env.AUTO_CONFIRM_HOURS ?? '24');
 
 const ORDER_DETAIL_SELECT = `
   *,
-  customer:profiles!orders_customer_id_fkey(id, nickname, avatar_url),
-  executor:profiles!orders_executor_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor),
+  customer:profiles!orders_customer_id_fkey(id, nickname, avatar_url, vip_expires_at),
+  executor:profiles!orders_executor_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at),
   order_attachments(id, file_name, file_size, visibility, created_at)
 `;
 
@@ -44,7 +45,7 @@ router.get('/', optionalAuth, async (req, res) => {
   const cap = Math.min(100, Math.max(1, parseInt(limit ?? '100', 10)));
   let q = supabase
     .from('orders')
-    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url)')
+    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url, vip_expires_at)')
     .eq('status', 'open')
     .eq('is_hidden', false)
     .order('created_at', { ascending: false })
@@ -56,12 +57,13 @@ router.get('/', optionalAuth, async (req, res) => {
   const { data: orders, error } = await q;
   if (error) return serverError(res, error);
   if (!orders?.length) return res.json([]);
-  if (!req.userId) return res.json(orders.map(o => ({ ...o, already_applied: false })));
+  const withVip = orders.map(o => ({ ...o, customer: withIsVip(o.customer) }));
+  if (!req.userId) return res.json(withVip.map(o => ({ ...o, already_applied: false })));
   const orderIds = orders.map(o => o.id);
   const { data: apps } = await supabase
     .from('order_applications').select('order_id').eq('executor_id', req.userId).in('order_id', orderIds);
   const appliedSet = new Set((apps || []).map(a => a.order_id));
-  res.json(orders.map(o => ({ ...o, already_applied: appliedSet.has(o.id) })));
+  res.json(withVip.map(o => ({ ...o, already_applied: appliedSet.has(o.id) })));
 });
 
 // ── CUSTOMER'S ORDERS ─────────────────────────────────────────────────────────
@@ -245,6 +247,8 @@ router.get('/:id', auth, async (req, res) => {
   const { data: existingApp } = await supabase
     .from('order_applications').select('id, status').eq('order_id', req.params.id).eq('executor_id', req.userId).maybeSingle();
   order.already_applied = existingApp != null;
+  order.customer = withIsVip(order.customer);
+  order.executor = withIsVip(order.executor);
   order.my_application_status = existingApp?.status ?? null;
 
   res.json(order);
@@ -294,11 +298,11 @@ router.get('/:id/applications', auth, async (req, res) => {
 
   const { data: apps, error } = await supabase
     .from('order_applications')
-    .select(`id, message, proposed_amount, status, created_at, executor:profiles!order_applications_executor_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor)`)
+    .select(`id, message, proposed_amount, status, created_at, executor:profiles!order_applications_executor_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
     .eq('order_id', req.params.id)
     .order('created_at', { ascending: true });
   if (error) return serverError(res, error);
-  res.json(apps);
+  res.json(apps.map(a => ({ ...a, executor: withIsVip(a.executor) })));
 });
 
 // ── SELECT EXECUTOR ───────────────────────────────────────────────────────────

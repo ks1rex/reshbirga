@@ -4,6 +4,7 @@ const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { getListingUsage } = require('../utils/listingLimit');
+const { withIsVip } = require('../utils/vip');
 
 const router = Router();
 
@@ -77,7 +78,7 @@ router.get('/', optionalAuth, async (req, res) => {
   const { search, owner_id, limit } = req.query;
   let q = supabase
     .from('listings')
-    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor)`)
+    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
     .order('created_at', { ascending: false })
     .limit(Math.min(200, Math.max(1, parseInt(limit ?? '200', 10))));
 
@@ -89,7 +90,7 @@ router.get('/', optionalAuth, async (req, res) => {
 
   const { data, error } = await q;
   if (error) return serverError(res, error);
-  let result = data ?? [];
+  let result = (data ?? []).map(l => ({ ...l, owner: withIsVip(l.owner) }));
   if (search?.trim()) {
     const s = search.trim().toLowerCase();
     result = result.filter(l => l.title.toLowerCase().includes(s) || l.description.toLowerCase().includes(s));
@@ -113,7 +114,7 @@ router.get('/mine', auth, async (req, res) => {
 router.get('/:id', auth, async (req, res) => {
   const { data: listing, error } = await supabase
     .from('listings')
-    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor)`)
+    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
     .eq('id', req.params.id)
     .single();
   if (error || !listing) return res.status(404).json({ error: 'Услуга не найдена' });
@@ -123,7 +124,7 @@ router.get('/:id', auth, async (req, res) => {
   if (!listing.is_active && !isOwner && !prof?.is_admin)
     return res.status(404).json({ error: 'Услуга не найдена' });
 
-  res.json(listing);
+  res.json({ ...listing, owner: withIsVip(listing.owner) });
 });
 
 // ── PATCH /listings/:id ───────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ const supabase = require('../supabase_client');
 const { detectContactInfo } = require('../utils/contactDetector');
 const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
+const { withIsVip } = require('../utils/vip');
 
 const router = Router();
 const upload = makeUploader();
@@ -28,8 +29,8 @@ router.get('/:id/messages', auth, async (req, res) => {
 
   let q = supabase
     .from('messages')
-    .select(`id, content, is_contact_info, moderation_reviewed, created_at,
-      sender:profiles!messages_sender_id_fkey(id, nickname, avatar_url),
+    .select(`id, content, is_contact_info, moderation_reviewed, is_admin_message, created_at,
+      sender:profiles!messages_sender_id_fkey(id, nickname, avatar_url, vip_expires_at),
       message_attachments(id, file_name, file_size)`)
     .eq('conversation_id', convId)
     .order('created_at', { ascending: false })
@@ -40,7 +41,7 @@ router.get('/:id/messages', auth, async (req, res) => {
   const { data, error } = await q;
   if (error) return serverError(res, error);
 
-  res.json((data ?? []).reverse()); // oldest-first for display
+  res.json((data ?? []).reverse().map(m => ({ ...m, sender: withIsVip(m.sender) }))); // oldest-first for display
 });
 
 // POST /conversations/:id/messages

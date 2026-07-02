@@ -5,6 +5,7 @@ const supabase = require('../supabase_client');
 const { moderateSync } = require('../utils/forumModerator');
 const { serverError }  = require('../utils/httpError');
 const { addReputation, grantAchievement } = require('../utils/reputation');
+const { withIsVip } = require('../utils/vip');
 
 const router   = Router();
 const PAGE_SIZE = 20;
@@ -66,7 +67,7 @@ router.get('/categories', async (req, res) => {
 router.get('/threads', async (req, res) => {
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? '10', 10)));
   const sort  = req.query.sort ?? 'activity';
-  const AUTHOR   = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url)';
+  const AUTHOR   = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at)';
   const CATEGORY = 'category:forum_categories(id, name, icon_name)';
 
   let q = supabase
@@ -79,7 +80,7 @@ router.get('/threads', async (req, res) => {
 
   const { data, error } = await q.limit(limit);
   if (error) return serverError(res, error, 'forum:threads-global');
-  res.json(data ?? []);
+  res.json((data ?? []).map(t => ({ ...t, author: withIsVip(t.author) })));
 });
 
 // ── GET /forum/trending-tags ──────────────────────────────────────────────────
@@ -95,7 +96,7 @@ router.get('/categories/:id/threads', async (req, res) => {
   const sort  = req.query.sort ?? 'activity';
   const offset = (page - 1) * PAGE_SIZE;
 
-  const AUTHOR = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url)';
+  const AUTHOR = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at)';
   const LAST   = 'last_post_author:profiles!forum_threads_last_post_author_id_fkey(id, nickname, avatar_url)';
 
   let q = supabase
@@ -113,18 +114,18 @@ router.get('/categories/:id/threads', async (req, res) => {
   // Category info for breadcrumb
   const { data: category } = await supabase.from('forum_categories').select('id, name, icon_name').eq('id', req.params.id).single();
 
-  res.json({ category, threads: threads ?? [], page, has_more: (threads?.length ?? 0) === PAGE_SIZE });
+  res.json({ category, threads: (threads ?? []).map(t => ({ ...t, author: withIsVip(t.author) })), page, has_more: (threads?.length ?? 0) === PAGE_SIZE });
 });
 
 // ── GET /forum/threads/:id ────────────────────────────────────────────────────
 router.get('/threads/:id', async (req, res) => {
   const { data: thread, error } = await supabase
     .from('forum_threads')
-    .select(`*, author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url), category:forum_categories(id, name, icon_name)`)
+    .select(`*, author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at), category:forum_categories(id, name, icon_name)`)
     .eq('id', req.params.id)
     .single();
   if (error || !thread) return res.status(404).json({ error: 'Тема не найдена' });
-  res.json(thread);
+  res.json({ ...thread, author: withIsVip(thread.author) });
 });
 
 // ── POST /forum/threads ───────────────────────────────────────────────────────
@@ -197,7 +198,7 @@ router.post('/threads/:id/view', async (req, res) => {
 router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
   const page   = Math.max(1, parseInt(req.query.page ?? '1', 10));
   const offset = (page - 1) * PAGE_SIZE;
-  const AUTHOR = 'author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url, rating_as_executor, level)';
+  const AUTHOR = 'author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url, rating_as_executor, level, vip_expires_at)';
 
   const { data: posts, error } = await supabase
     .from('forum_posts')
@@ -217,9 +218,10 @@ router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
     isAdmin = prof?.is_admin ?? false;
   }
 
-  const sanitized = (posts ?? []).map(p =>
-    p.is_deleted && !isAdmin ? { ...p, content: '', reactions: [] } : p
-  );
+  const sanitized = (posts ?? []).map(p => {
+    const withAuthor = { ...p, author: withIsVip(p.author) };
+    return withAuthor.is_deleted && !isAdmin ? { ...withAuthor, content: '', reactions: [] } : withAuthor;
+  });
 
   res.json({ posts: sanitized, page, has_more: (posts?.length ?? 0) === PAGE_SIZE });
 });
@@ -249,7 +251,7 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
       content:           content.trim(),
       moderation_status: process.env.DEEPSEEK_API_KEY ? 'pending_review' : 'approved',
     })
-    .select(`id, content, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url)`)
+    .select(`id, content, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url, vip_expires_at)`)
     .single();
 
   if (error) return serverError(res, error, 'forum:reply');
@@ -257,7 +259,7 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
   await addReputation(supabase, req.userId, 2);
   await bumpForumPostsCount(req.userId);
 
-  res.status(201).json(post);
+  res.status(201).json({ ...post, author: withIsVip(post.author) });
 });
 
 // ── DELETE /forum/posts/:id ───────────────────────────────────────────────────

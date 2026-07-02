@@ -4,6 +4,7 @@ const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { nextLevelReputation } = require('../utils/reputation');
+const { isVip } = require('../utils/vip');
 
 const router = Router();
 router.use(auth);
@@ -11,7 +12,7 @@ router.use(auth);
 const PUBLIC_FIELDS = `
   id, nickname, full_name, avatar_url, bio, skills,
   level, reputation, forum_posts_count, deals_count,
-  average_rating, reviews_count, created_at
+  average_rating, reviews_count, created_at, vip_expires_at
 `;
 
 // GET /profile/leaderboard — top 10 by reputation gained in the last 7 days
@@ -65,8 +66,10 @@ router.get('/:id/public', async (req, res) => {
     ...(threads ?? []).map(t => ({ type: 'thread', title: t.title, ago: t.created_at })),
   ].sort((a, b) => new Date(b.ago) - new Date(a.ago)).slice(0, 10);
 
+  const { vip_expires_at, ...profRest } = prof;
   res.json({
-    ...prof,
+    ...profRest,
+    is_vip: isVip(vip_expires_at),
     next_level_reputation: nextLevelReputation(prof.reputation),
     achievements: achievements ?? [],
     recent_activity,
