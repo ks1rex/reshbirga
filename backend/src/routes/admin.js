@@ -299,8 +299,15 @@ router.get('/stats', async (req, res) => {
 router.get('/users', async (req, res) => {
   const { search, filter } = req.query;
 
-  // Fetch auth users for emails via service-role admin API
-  const { data: { users: authUsers }, error: authErr } = await supabase.auth.admin.listUsers({ perPage: 1000 });
+  // Fetch auth users for emails via service-role admin API.
+  // @supabase/auth-js's listUsers() defaults an omitted `page` to '' (empty
+  // string, not a number) and sends it straight through as ?page= to GoTrue's
+  // /admin/users, which 500s on the empty value — must always pass page
+  // explicitly. Guard perPage the same way in case this ever becomes
+  // configurable from the client.
+  const page    = Number(req.query.page) || 1;
+  const perPage = Number(req.query.per_page) || 1000;
+  const { data: { users: authUsers }, error: authErr } = await supabase.auth.admin.listUsers({ page, perPage });
   if (authErr) return serverError(res, authErr);
 
   const emailMap = {};
@@ -802,6 +809,57 @@ router.get('/conversations', async (req, res) => {
   res.json({ conversations: result, total: count ?? 0, page: pg, limit: lim });
 });
 
+// GET /admin/conversations/:id/messages?before=<timestamp>&limit=<n>
+router.get('/conversations/:id/messages', async (req, res) => {
+  const { id: convId } = req.params;
+  const { before, limit = 100 } = req.query;
+
+  let q = supabase
+    .from('messages')
+    .select(`id, content, is_contact_info, moderation_reviewed, is_admin_message, created_at,
+      sender:profiles!messages_sender_id_fkey(id, nickname, avatar_url),
+      message_attachments(id, file_name, file_size)`)
+    .eq('conversation_id', convId)
+    .order('created_at', { ascending: false })
+    .limit(Number(limit));
+
+  if (before) q = q.lt('created_at', before);
+
+  const { data, error } = await q;
+  if (error) return serverError(res, error);
+
+  res.json(data.reverse()); // oldest-first for display
+});
+
+// POST /admin/conversations/:id/messages
+router.post('/conversations/:id/messages', async (req, res) => {
+  const { id: convId } = req.params;
+  const content = req.body.content?.trim();
+
+  if (!content) return res.status(400).json({ error: 'content is required' });
+  if (content.length > 5000) return res.status(400).json({ error: 'Сообщение слишком длинное' });
+
+  const { data: conv } = await supabase
+    .from('conversations')
+    .select('id, type, support_ticket_id')
+    .eq('id', convId)
+    .single();
+
+  const { data: msg, error: msgErr } = await supabase
+    .from('messages')
+    .insert({ conversation_id: convId, sender_id: req.userId, content, is_admin_message: true })
+    .select()
+    .single();
+
+  if (msgErr) return serverError(res, msgErr);
+
+  if (conv?.type === 'support_ticket' && conv.support_ticket_id) {
+    await supabase.from('support_tickets').update({ status: 'answered' }).eq('id', conv.support_ticket_id);
+  }
+
+  res.status(201).json(msg);
+});
+
 // ─── Settings ───────────────────────────────────────────────
 
 // PUT /admin/settings/:key  (site_settings — payment requisites etc.)
@@ -817,11 +875,43 @@ router.put('/settings/:key', async (req, res) => {
   res.json(data);
 });
 
+// Validation rules for admin_settings keys.
+// ponytail: flat lookup table, add an entry here when adding a new tunable setting.
+const ADMIN_SETTING_VALIDATORS = {
+  withdrawal_commission_pct: 'percent',
+  vip_token_discount_pct:    'percent',
+  referral_bonus_pct:        'percent',
+  vip_duration_month_days:   'positive_int',
+  vip_duration_year_days:    'positive_int',
+  listing_limit_base:        'positive_int',
+  listing_limit_vip:         'positive_int',
+  referral_max_count:        'positive_int',
+  vip_price_month:           'price',
+  vip_price_year:            'price',
+  gost_token_price:          'price',
+  referral_min_amount:       'price',
+};
+
+function validateAdminSettingValue(key, value) {
+  const kind = ADMIN_SETTING_VALIDATORS[key];
+  if (!kind) {
+    return `Неизвестный ключ настройки. Допустимые ключи: ${Object.keys(ADMIN_SETTING_VALIDATORS).join(', ')}`;
+  }
+  const num = Number(value);
+  if (Number.isNaN(num)) return 'Значение должно быть числом';
+  if (kind === 'percent' && (num < 0 || num > 100)) return 'Значение должно быть от 0 до 100';
+  if (kind === 'positive_int' && (!Number.isInteger(num) || num <= 0)) return 'Значение должно быть положительным целым числом';
+  if (kind === 'price' && num < 0) return 'Значение должно быть неотрицательным числом';
+  return null;
+}
+
 // PUT /admin/admin-settings/:key  (admin_settings — rates, prices)
 router.put('/admin-settings/:key', async (req, res) => {
   const { key } = req.params;
   const { value } = req.body;
   if (value == null) return res.status(400).json({ error: 'value is required' });
+  const validationError = validateAdminSettingValue(key, value);
+  if (validationError) return res.status(400).json({ error: validationError });
   const { data, error } = await supabase
     .from('admin_settings')
     .upsert({ key, value: String(value), updated_by: req.userId, updated_at: new Date().toISOString() }, { onConflict: 'key' })
