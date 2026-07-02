@@ -45,7 +45,7 @@ router.get('/', async (req, res) => {
 
 const MONTH_NAMES = ['Янв', 'Фев', 'Мар', 'Апр', 'Май', 'Июн', 'Июл', 'Авг', 'Сен', 'Окт', 'Ноя', 'Дек'];
 const INCOME_TYPES  = ['deposit', 'deposit_referral', 'referral_bonus'];
-const OUTCOME_TYPES = ['withdrawal', 'gost_tokens'];
+const OUTCOME_TYPES = ['withdrawal', 'balance_to_token'];
 
 // GET /wallet/chart — last 6 months of income/outcome
 router.get('/chart', async (req, res) => {
