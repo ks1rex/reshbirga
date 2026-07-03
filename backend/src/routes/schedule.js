@@ -48,7 +48,7 @@ router.get('/lessons', async (req, res) => {
 // POST /schedule/save-group  { groupId, facultyId, studyId }
 router.post('/save-group', auth, async (req, res) => {
   const { groupId, facultyId, studyId } = req.body;
-  if (!groupId || !facultyId) return res.status(400).json({ error: 'Укажите groupId и facultyId' });
+  if (groupId == null || facultyId == null) return res.status(400).json({ error: 'Укажите groupId и facultyId' });
   const { error } = await supabase
     .from('profiles')
     .update({
