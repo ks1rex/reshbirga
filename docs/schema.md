@@ -60,3 +60,5 @@ Key/value table, not covered by a migration entry above since it holds tunable b
 
 ## RLS boundary
 Every listed table has RLS enabled, but the backend's Supabase client (`backend/src/supabase_client.js`) is service-role and bypasses RLS. **Express routes are the real authorization boundary**, not the database.
+
+**`schedule_warmup_state`** (added by `0036_schedule_warmup_state.sql`'s real live counterpart, not the local file — see above) had **no RLS at all** until `20260716120000_schedule_warmup_state_rls.sql` (2026-07-16) — it held a third-party `session_cookie` and captcha image readable/writable via the public anon key. Now `service_role`-only, no public `SELECT`.
