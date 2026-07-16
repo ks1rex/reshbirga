@@ -48,7 +48,7 @@ backend/
     └── utils/             # contactDetector, aiChatCheck, autoConfirm, reputation, forumModerator, search, telegramNotify
 
 supabase/
-├── migrations/            # 0001-0025 (+0024b), sequential, already applied
+├── migrations/            # 0001-0036 (+0024b) — DO NOT trust as applied history, see "Migration history" below
 ├── migrations-ebu/        # parked/unapplied, don't assume live
 └── functions/notify-admin-events/  # Edge Function: Telegram notifications
 
@@ -78,6 +78,21 @@ Backend ships as a Docker image (`backend/Dockerfile`) to Render; env vars are s
 ## Known spec deviations
 
 Several gamification/achievement thresholds and legacy endpoint names don't map 1:1 to the original spec (e.g. GOST-calculator usage tracked per token-purchase rather than per-calculation, `early_bird` measured from the first account's `created_at` rather than a configured launch date). Full list with rationale: `TODO_BACKEND.md`.
+
+## Migration history — read before touching `supabase/migrations/`
+
+**The numbered files `0011_triggers.sql` through `0036_schedule_warmup_state.sql` do NOT reflect what's actually applied to the live project (`btcpbvevytmhgkevhnyj`) — do not run them, individually or via `supabase db push`.** Each of those 26 files now carries a warning comment at the top saying the same thing; this is the explanation.
+
+**What actually happened**: reshbirga and Sait are two separate repos, each with its own local `supabase/migrations/` starting numbering at `0001`, but both linked to the *same* physical Supabase project (one shared `schema_migrations` history table, not per-repo). Two consequences:
+
+- **`0001`–`0010`**: version numbers collide with Sait's own migrations, pushed independently. `supabase migration list` shows these as "matching" between local and remote, but that's a false match on the number only — the actual applied SQL under those versions is Sait's schema, not reshbirga's.
+- **`0011`–`0036`**: reshbirga's *own* schema was really applied, just not through these files — it went in via 24 separate timestamp-versioned migrations (plus later per-object patches), not this renumbered sequence. This repo's `0011`–`0036` are a rewritten/reorganized local history that was never actually pushed under these version strings.
+
+**Two full audits already did the forensic work — read them instead of re-deriving this:**
+- `docs/AUDIT_MIGRATION_DRIFT_2026.md` — full list and description of the 24 real timestamp migrations, how the collision happened, and what each one actually does (includes the full source of `claim_referral_bonus_slot`, the RPC referenced in the security audit).
+- `docs/AUDIT_MIGRATION_SAFETY_2026.md` — file-by-file safety classification of all 26 local files (`0011`–`0036`) against the real live schema: which are harmless no-ops if ever run, which fail loudly (annoying but safe), and which — `0018_balance_refactor.sql` and especially `0019_simplify_order_type.sql` — would either error out or (worse, `0019`) silently apply a real, unintended, hard-to-reverse schema change because the live schema doesn't match what the file assumes.
+
+**Going forward: new migrations must use a timestamp-based version (`YYYYMMDDHHMMSS_description.sql`), not the next sequential number.** This sidesteps the exact collision that caused all of this — sequential numbering only works if exactly one thing in the world is allowed to push to the project, and that stopped being true here.
 
 ## Reference docs
 

@@ -1,3 +1,9 @@
+-- ВНИМАНИЕ: НЕ ПРИМЕНЯТЬ. Этот файл не отражает реальное состояние живой БД
+-- (btcpbvevytmhgkevhnyj) — см. docs/AUDIT_MIGRATION_SAFETY_2026.md за построчным
+-- разбором безопасности и docs/AUDIT_MIGRATION_DRIFT_2026.md за объяснением,
+-- почему локальная нумерация 0001-0036 разошлась с реальной историей.
+-- Реальная схема применена под timestamp-версиями миграций, не под этим именем.
+
 -- Security-review fix on purchase_vip (0027_vip.sql):
 -- HIGH: the transactions ledger insert was done separately in Express after
 --   the RPC returned — if that insert failed (or the process died in between),

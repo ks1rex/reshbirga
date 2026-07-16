@@ -1,3 +1,9 @@
+-- ВНИМАНИЕ: НЕ ПРИМЕНЯТЬ. Этот файл не отражает реальное состояние живой БД
+-- (btcpbvevytmhgkevhnyj) — см. docs/AUDIT_MIGRATION_SAFETY_2026.md за построчным
+-- разбором безопасности и docs/AUDIT_MIGRATION_DRIFT_2026.md за объяснением,
+-- почему локальная нумерация 0001-0036 разошлась с реальной историей.
+-- Реальная схема применена под timestamp-версиями миграций, не под этим именем.
+
 -- Adds an optional p_meta jsonb param to buy_gost_tokens so callers (reshbirga's
 -- POST /gost/buy-tokens) can record VIP-discount audit info on the transaction row.
 -- Backward compatible: existing callers omitting p_meta keep prior behavior (meta = NULL).

@@ -1,6 +1,20 @@
 # Database Schema
 
-Supabase Postgres, RLS on. Migrations in `supabase/migrations/0001`..`0027` (+ `0024b`) are sequential and already applied to the live project (`btcpbvevytmhgkevhnyj` — shared with the Sait/ГОСТ backend, see root `CLAUDE.md`). Add a new numbered file rather than editing an old one — treat them as ordered history. `supabase/migrations-ebu/` is a separate, apparently-unapplied/parked migration set — don't assume it's live. Note: `0017_wallet_webhooks.sql` hardcodes a different, stale project ref in its edge-function URL and its trigger/function were not found live on `btcpbvevytmhgkevhnyj` — the deposit/withdrawal Telegram webhook from that migration appears to have never actually been wired up here; verify before relying on it.
+Supabase Postgres, RLS on. Shared project (`btcpbvevytmhgkevhnyj`, shared with the Sait/ГОСТ backend, see root `CLAUDE.md`).
+
+## ⚠️ `supabase/migrations/0011`–`0036` do not reflect the live database — do not apply them
+
+Despite the numbered filenames looking like sequential, already-applied history, **`0011_triggers.sql` through `0036_schedule_warmup_state.sql` were never actually run against `btcpbvevytmhgkevhnyj` under these version numbers.** Each of those 26 files now has a warning comment at the top saying the same thing. Below the table-of-contents sections in this doc still cite these file numbers (e.g. "added in 0016") — treat those as **conceptual/topical pointers to which local file covers a table**, not as a claim about what version string is actually recorded in the database.
+
+**Root cause**: reshbirga and Sait are separate repos that each maintain their own local `supabase/migrations/`, both starting at `0001`, both linked to this one shared Supabase project (one `schema_migrations` history table for the whole project, not per-repo):
+- `0001`–`0010` collide in version *number* with Sait's own independently-pushed migrations — `supabase migration list` shows these as "matching," but that's a false match on the number only; the actually-applied SQL under those versions is Sait's schema.
+- `0011`–`0036` is reshbirga's own schema, genuinely applied — just via 24 separate timestamp-versioned migrations (plus later per-object patches) that were never captured as files in this repo's numbered sequence, rather than through these renumbered local files.
+
+**Full detail, not repeated here:**
+- `docs/AUDIT_MIGRATION_DRIFT_2026.md` — the 24 real timestamp migrations that actually built this schema, what each does, and the full source of `claim_referral_bonus_slot`.
+- `docs/AUDIT_MIGRATION_SAFETY_2026.md` — per-file safety verdict for all 26 local files against the real live schema. Two are actively dangerous if ever run: `0018_balance_refactor.sql` (errors out immediately — references columns, `balance_available`/`balance_pending`, that don't exist live) and especially `0019_simplify_order_type.sql` (would **succeed silently** and irreversibly convert the live `order_type` column from flexible `text` to a rigid two-value enum it was never meant to have).
+
+**New migrations must use a timestamp version (`YYYYMMDDHHMMSS_description.sql`)**, not the next sequential number — sequential numbering only works when exactly one thing pushes to a project; that stopped being true here. `supabase/migrations-ebu/` is a separate, apparently-unapplied/parked migration set — don't assume it's live (**caveat**: this note itself was found to be wrong once already — `migrations-ebu/020_reputation_log.sql` turned out to be live, applied directly out-of-band; verify against `information_schema`/`pg_proc` rather than trusting the folder name alone if it matters for what you're doing).
 
 Exact columns/constraints live in the migration files; this is a table-of-contents, not a column dump.
 
@@ -34,6 +48,7 @@ Exact columns/constraints live in the migration files; this is a table-of-conten
 - `notify_deposit_insert` / `notify_withdrawal_insert` (0017) — webhook triggers
 - `add_referral_earnings` (0024b)
 - `update_profile_average_rating`, `grant_early_bird` (0025)
+- `claim_referral_bonus_slot` (real version: `20260613214919`/`referral_slot_rpc`, see "0011–0036 do not reflect the live database" above) — atomic, race-free referral-slot cap enforcement (`SELECT ... FOR UPDATE`)
 
 **Money paths use these RPCs, not app-level read-modify-write.** Before adding new balance-mutating code in Express, check for an existing atomic RPC above. The one exception is `addReputation` in `backend/src/utils/reputation.js` (read-then-update, flagged with a `ponytail:` comment as unsafe for anything money-related — reputation points only, not balances).
 

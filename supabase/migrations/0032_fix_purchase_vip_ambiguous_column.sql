@@ -1,3 +1,9 @@
+-- ВНИМАНИЕ: НЕ ПРИМЕНЯТЬ. Этот файл не отражает реальное состояние живой БД
+-- (btcpbvevytmhgkevhnyj) — см. docs/AUDIT_MIGRATION_SAFETY_2026.md за построчным
+-- разбором безопасности и docs/AUDIT_MIGRATION_DRIFT_2026.md за объяснением,
+-- почему локальная нумерация 0001-0036 разошлась с реальной историей.
+-- Реальная схема применена под timestamp-версиями миграций, не под этим именем.
+
 -- Bug fix: purchase_vip's RETURNS TABLE(success boolean, vip_expires_at timestamptz)
 -- creates an implicit PL/pgSQL OUT variable named vip_expires_at, which collides
 -- with the profiles.vip_expires_at column read inside

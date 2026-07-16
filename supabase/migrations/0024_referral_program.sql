@@ -1,3 +1,9 @@
+-- ВНИМАНИЕ: НЕ ПРИМЕНЯТЬ. Этот файл не отражает реальное состояние живой БД
+-- (btcpbvevytmhgkevhnyj) — см. docs/AUDIT_MIGRATION_SAFETY_2026.md за построчным
+-- разбором безопасности и docs/AUDIT_MIGRATION_DRIFT_2026.md за объяснением,
+-- почему локальная нумерация 0001-0036 разошлась с реальной историей.
+-- Реальная схема применена под timestamp-версиями миграций, не под этим именем.
+
 -- Referral program: fields on profiles + deposit_requests + updated trigger.
 --
 -- Each new user gets a unique referral_code (8-char hex from their UUID).

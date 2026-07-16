@@ -1,3 +1,9 @@
+-- ВНИМАНИЕ: НЕ ПРИМЕНЯТЬ. Этот файл не отражает реальное состояние живой БД
+-- (btcpbvevytmhgkevhnyj) — см. docs/AUDIT_MIGRATION_SAFETY_2026.md за построчным
+-- разбором безопасности и docs/AUDIT_MIGRATION_DRIFT_2026.md за объяснением,
+-- почему локальная нумерация 0001-0036 разошлась с реальной историей.
+-- Реальная схема применена под timestamp-версиями миграций, не под этим именем.
+
 -- Production bug fix: grant_early_bird() (0025_levels_achievements_categories.sql)
 -- is SECURITY DEFINER with no explicit search_path and references `profiles`/
 -- `achievements` unqualified. Depending on the caller's session search_path
