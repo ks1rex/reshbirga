@@ -40,5 +40,8 @@ Exact columns/constraints live in the migration files; this is a table-of-conten
 ## Storage
 S3-compatible bucket configured in `0012_storage_bucket.sql`, used for order/message attachments.
 
+## Business parameters (`admin_settings`)
+Key/value table, not covered by a migration entry above since it holds tunable business params rather than schema. Current documented values: `withdrawal_commission_pct` = 10 (platform cut, held on withdrawal — see root `CLAUDE.md`), `referral_bonus_pct` = 5 (referrer's cut of a referred user's first 3 deposits, default fallback in `backend/src/routes/admin.js` line 444 if the key is unset). Check this table directly for current values before hardcoding a rate elsewhere.
+
 ## RLS boundary
 Every listed table has RLS enabled, but the backend's Supabase client (`backend/src/supabase_client.js`) is service-role and bypasses RLS. **Express routes are the real authorization boundary**, not the database.

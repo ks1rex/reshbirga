@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-СтудБиржа — student services marketplace. Customers post orders/catalog listings, executors apply, payment is held in escrow, released on confirmation, disputes are arbitrated by admins. Platform takes 10% commission on wallet deposits.
+СтудБиржа — student services marketplace. Customers post orders/catalog listings, executors apply, payment is held in escrow, released on confirmation, disputes are arbitrated by admins. Platform takes a 10% commission, held on **withdrawal** (not on deposit — deposits are credited 1:1; rate in `admin_settings.withdrawal_commission_pct`).
 
 Repo is in Russian (UI text, commit-adjacent docs, error messages). Match that when writing user-facing strings.
 
