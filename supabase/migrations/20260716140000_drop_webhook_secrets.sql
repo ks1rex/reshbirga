@@ -1,0 +1,29 @@
+-- Removes dead infrastructure: the notify-admin-events webhook mechanism.
+--
+-- Verified before writing this migration:
+-- - webhook_secrets was read only by supabase/functions/notify-admin-events/
+--   index.ts (now deleted) — grepped reshbirga, ebu.gubkin, and Sait, no
+--   other code path references this table.
+-- - The Edge Function's lookup queried name='notify_admin_events' (underscore)
+--   while the seeded row was named 'notify-admin-events' (hyphen) — the
+--   lookup always returned null, so the function 401'd on every request,
+--   including any legitimate caller.
+-- - notify_deposit_insert / notify_withdrawal_insert (defined in
+--   0017_wallet_webhooks.sql, meant to call this function via pg_net) were
+--   never actually applied to the live database (confirmed via pg_proc —
+--   they don't exist) — consistent with the "never wired up" note already
+--   in docs/schema.md for 0017_wallet_webhooks.sql. Even if they had been
+--   applied, that migration's net.http_post calls never sent the
+--   x-webhook-secret header at all, so the two pieces never actually worked
+--   together as designed.
+-- - Real admin Telegram notifications (deposit/withdrawal confirmations,
+--   referral bonuses, etc.) go through a separate, working path:
+--   backend/src/utils/telegramNotify.js, called synchronously from Express
+--   (backend/src/routes/admin.js) — unaffected by this migration.
+--
+-- Net effect: this table held nothing but an unrotated placeholder secret
+-- ('REPLACE_WITH_SECURE_SECRET') for a webhook that could never fire.
+-- Dropping it removes both the dead code path and the placeholder-secret
+-- exposure in the schema.
+
+DROP TABLE IF EXISTS webhook_secrets;

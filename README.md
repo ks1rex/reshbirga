@@ -14,7 +14,7 @@
 | Backend | Node.js 20 + Express | Render (Docker) |
 | БД / Auth / Storage | Supabase (PostgreSQL, RLS, S3-хранилище) | supabase.com |
 | AI-модерация | DeepSeek API (`deepseek-chat`) | ─ |
-| Уведомления | Telegram Bot API (Supabase Edge Function) | supabase.com |
+| Уведомления | Telegram Bot API (напрямую из Express, `backend/src/utils/telegramNotify.js`) | Render |
 
 ---
 
@@ -43,9 +43,7 @@ reshbirga/
 │   └── main.js
 │
 ├── supabase/
-│   ├── migrations/             # 0001–0023: схема, RLS, функции, индексы
-│   └── functions/
-│       └── notify-admin-events/ # Edge Function: Telegram-уведомления
+│   └── migrations/             # 0001–0023: схема, RLS, функции, индексы
 │
 └── .github/
     └── workflows/
@@ -109,14 +107,12 @@ npm run dev                   # http://localhost:3001 (nodemon)
 | `ADMIN_PASSWORD` | Пароль admin-аккаунта (только для smoke-теста) | **ДА** |
 | `BACKEND_URL` | URL backend для smoke-теста (default: `http://localhost:3001`) | нет |
 
-### Supabase Edge Function — `notify-admin-events`
+Telegram-уведомления настраиваются теми же переменными окружения backend (Render → Environment), не отдельным сервисом:
 
-Секреты задаются в **Supabase Dashboard → Edge Functions → Secrets**, не в backend `.env`:
-
-| Переменная | Описание |
-|-----------|---------|
-| `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота (`@BotFather`) |
-| `TELEGRAM_CHAT_ID` | ID чата/канала для уведомлений |
+| Переменная | Описание | Секрет? |
+|-----------|---------|---------|
+| `TELEGRAM_BOT_TOKEN` | Токен Telegram-бота (`@BotFather`) | **ДА** |
+| `TELEGRAM_CHAT_ID` | ID чата/канала для уведомлений (default: личный чат) | нет |
 
 ---
 

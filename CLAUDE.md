@@ -13,7 +13,7 @@ Repo is in Russian (UI text, commit-adjacent docs, error messages). Match that w
 - Backend: Node.js 20 + Express, deployed to Render as Docker
 - DB/Auth/Storage: Supabase (Postgres + RLS + S3 storage) — schema details in `@docs/schema.md`
 - AI moderation: DeepSeek API (`deepseek-chat`)
-- Notifications: Telegram Bot API via a Supabase Edge Function
+- Notifications: Telegram Bot API, called synchronously from Express (`backend/src/utils/telegramNotify.js`, used by `routes/admin.js`/`routes/orders.js`) — an earlier Supabase Edge Function path (`notify-admin-events`) was dead code and removed (2026-07-16), see `docs/schema.md`
 - `frontend/` in this repo is **deprecated and unused**. The real, active UI lives in the separate `ebu.gubkin` repository.
 
 ## Commands
@@ -49,8 +49,7 @@ backend/
 
 supabase/
 ├── migrations/            # 0001-0036 (+0024b) — DO NOT trust as applied history, see "Migration history" below
-├── migrations-ebu/        # parked/unapplied, don't assume live
-└── functions/notify-admin-events/  # Edge Function: Telegram notifications
+└── migrations-ebu/        # parked/unapplied, don't assume live (see docs/schema.md caveat)
 
 frontend/                  # deprecated, see Stack above — do not extend
 ```
