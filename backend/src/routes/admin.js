@@ -139,56 +139,6 @@ router.post('/disputes/:id/resolve', async (req, res) => {
   res.json({ success: true });
 });
 
-// ─── Contact-exchange orders ─────────────────────────────────
-
-// GET /admin/contact-exchange-orders?status=
-router.get('/contact-exchange-orders', async (req, res) => {
-  const { status } = req.query;
-
-  let q = supabase
-    .from('orders')
-    .select(`
-      id, title, status, contact_exchange_reason, deposit_amount, created_at,
-      customer:profiles!orders_customer_id_fkey(id, nickname),
-      executor:profiles!orders_executor_id_fkey(id, nickname),
-      conversations(id)
-    `)
-    .eq('requires_contact_exchange', true)
-    .order('created_at', { ascending: false })
-    .limit(200);
-
-  if (status) q = q.eq('status', status);
-
-  const { data: orders, error } = await q;
-  if (error) return serverError(res, error);
-
-  if (!orders?.length) return res.json([]);
-
-  // Attach flagged message counts per conversation
-  const convIds = orders.flatMap(o => (o.conversations ?? []).map(c => c.id));
-  let flagCounts = {};
-  if (convIds.length) {
-    const { data: flags } = await supabase
-      .from('messages')
-      .select('conversation_id')
-      .in('conversation_id', convIds)
-      .eq('is_contact_info', true);
-    for (const f of (flags ?? [])) {
-      flagCounts[f.conversation_id] = (flagCounts[f.conversation_id] ?? 0) + 1;
-    }
-  }
-
-  res.json(orders.map(o => {
-    const convId = o.conversations?.[0]?.id ?? null;
-    return {
-      ...o,
-      conversation_id: convId,
-      flagged_messages: convId ? (flagCounts[convId] ?? 0) : 0,
-      conversations: undefined,
-    };
-  }));
-});
-
 // ─── Support tickets (admin) ─────────────────────────────────
 
 // PATCH /admin/support/tickets/:id/close
