@@ -378,100 +378,35 @@ router.post('/deposits/:id/confirm', async (req, res) => {
   if (!confirmedAmount || confirmedAmount <= 0 || isNaN(confirmedAmount))
     return res.status(400).json({ error: 'Некорректная сумма подтверждения' });
 
-  // Deposits are credited 1:1 — commission moved to withdrawal (see
-  // withdrawal_commission_pct). Referral parameters are still admin-configurable
-  // via admin_settings; fall back to the documented defaults (5% / 100₽) if a
-  // row is missing or malformed so confirmation never breaks on bad config.
-  const { data: settingsRows } = await supabase
-    .from('admin_settings')
-    .select('key, value')
-    .in('key', ['referral_bonus_pct', 'referral_min_amount']);
-  const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
-  const num = (key, fallback) => {
-    const v = parseFloat(settings[key]);
-    return Number.isFinite(v) ? v : fallback;
-  };
-  const referralPct   = num('referral_bonus_pct', 5);
-  const referralMin   = num('referral_min_amount', 100);
+  // Atomic: claim + credit depositor + wallet_topup_total + referral bonus
+  // (claim_referral_bonus_slot + payout + both ledger rows) all in one
+  // transaction — see 20260716160000_confirm_deposit_request_atomic.sql for
+  // why this replaced ~9 separate round-trips (partial-failure window between
+  // "marked confirmed" and "actually credited").
+  const { data: rpcRows, error: rpcError } = await supabase.rpc('confirm_deposit_request', {
+    p_deposit_id: req.params.id,
+    p_confirmed_amount: confirmedAmount,
+    p_processed_by: req.userId,
+  });
+  if (rpcError) return serverError(res, rpcError, 'deposit:confirm:rpc');
 
-  const creditedAmount    = confirmedAmount;
-  const platformGross     = 0;
-  const now               = new Date().toISOString();
-
-  // Referrer lookup — the final bonus decision is made atomically below via
-  // claim_referral_bonus_slot (race-free, capped at referral_max_count).
-  const { data: userProfile } = await supabase
-    .from('profiles')
-    .select('nickname, referred_by')
-    .eq('id', dep.user_id)
-    .single();
-
-  const referrerId    = userProfile?.referred_by ?? null;
-  const referralBonus = Math.round(confirmedAmount * (referralPct / 100) * 100) / 100;
-  const preEligible   = referrerId != null && confirmedAmount >= referralMin;
-
-  // Atomic claim — prevents double-processing of this deposit
-  const { data: claimed, error: claimErr } = await supabase
-    .from('deposit_requests')
-    .update({
-      status:           'confirmed',
-      confirmed_amount: confirmedAmount,
-      credited_amount:  creditedAmount,
-      processed_by:     req.userId,
-      processed_at:     now,
-    })
-    .eq('id', req.params.id)
-    .eq('status', 'pending')
-    .select('id');
-  if (claimErr) return serverError(res, claimErr, 'deposit:confirm:claim');
-  if (!claimed || claimed.length === 0)
+  const result = rpcRows?.[0];
+  if (!result?.out_success)
     return res.status(409).json({ error: 'Заявка уже обработана' });
 
-  // Credit depositor's wallet
-  await supabase.rpc('add_wallet_balance', { p_user_id: dep.user_id, p_amount: creditedAmount });
-  await supabase.from('profiles').update({ last_deposit_confirmed_at: now }).eq('id', dep.user_id);
+  const creditedAmount = result.out_credited_amount;
+  const bonusApplied   = result.out_bonus_applied;
+  const referralBonus  = result.out_referral_bonus ?? 0;
+  const referrerId     = result.out_referrer_id;
+
+  const { data: userProfile } = await supabase.from('profiles').select('nickname').eq('id', dep.user_id).single();
 
   // wallet_top achievement: 5000₽+ in cumulative topups
-  const { data: topupProf } = await supabase.from('profiles').select('wallet_topup_total').eq('id', dep.user_id).single();
-  const topupTotal = parseFloat(topupProf?.wallet_topup_total ?? 0) + confirmedAmount;
-  await supabase.from('profiles').update({ wallet_topup_total: topupTotal }).eq('id', dep.user_id);
-  if (topupTotal >= 5000) await grantAchievement(supabase, dep.user_id, 'wallet_top');
-
-  // Atomically claim a referral-bonus slot. Returns true only if a slot was free
-  // (count < cap), incrementing the counter under a row lock in the same call —
-  // so concurrent confirms can never grant more than `referral_max_count` bonuses.
-  let bonusApplied = false;
-  if (preEligible) {
-    const { data: slot } = await supabase.rpc('claim_referral_bonus_slot', { p_user_id: dep.user_id });
-    bonusApplied = slot === true;
+  if (parseFloat(result.out_wallet_topup_total ?? 0) >= 5000) {
+    await grantAchievement(supabase, dep.user_id, 'wallet_top');
   }
 
   if (bonusApplied) {
-    // deposit_referral: deposit itself carries no platform profit (commission moved
-    // to withdrawal); referral bonus is paid out of platform withdrawal profit, not this deposit.
-    await supabase.from('transactions').insert({
-      user_id:         dep.user_id,
-      type:            'deposit_referral',
-      amount:          creditedAmount,
-      status:          'completed',
-      platform_profit: platformGross,
-      meta:            { referrer_id: referrerId, referrer_bonus: referralBonus, platform_profit_net: platformGross - referralBonus },
-    });
-    await supabase.from('deposit_requests')
-      .update({ referral_bonus_applied: true, referral_bonus_amount: referralBonus })
-      .eq('id', req.params.id);
-
-    // Pay referral bonus
-    await supabase.rpc('add_wallet_balance', { p_user_id: referrerId, p_amount: referralBonus });
-    await supabase.rpc('add_referral_earnings', { p_user_id: referrerId, p_amount: referralBonus });
-    await supabase.from('transactions').insert({
-      user_id: referrerId,
-      type:    'referral_bonus',
-      amount:  referralBonus,
-      status:  'completed',
-      meta:    { from_user_id: dep.user_id, deposit_amount: confirmedAmount },
-    });
-
     // referrer achievement: 3+ referred users with at least one qualifying deposit
     const { count: qualifyingReferrals } = await supabase
       .from('profiles').select('id', { count: 'exact', head: true })
@@ -485,15 +420,6 @@ router.post('/deposits/:id/confirm', async (req, res) => {
       `Реферер: @${referrerProfile?.nickname ?? referrerId} получил ${referralBonus} ₽\n` +
       `Депозит: ${confirmedAmount} ₽ от @${userProfile?.nickname ?? dep.user_id}`
     );
-  } else {
-    // Regular deposit: credited 1:1, no platform profit
-    await supabase.from('transactions').insert({
-      user_id:         dep.user_id,
-      type:            'deposit',
-      amount:          creditedAmount,
-      status:          'completed',
-      platform_profit: platformGross,
-    });
   }
 
   // Confirm notification
