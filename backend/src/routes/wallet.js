@@ -184,7 +184,7 @@ const VIP_PLANS = { month: { priceKey: 'vip_price_month', daysKey: 'vip_duration
 async function vipPricing(userId) {
   const [{ data: settingsRows }, { data: prof }] = await Promise.all([
     supabase.from('admin_settings').select('key, value')
-      .in('key', Object.values(VIP_PLANS).flatMap(p => [p.priceKey, p.daysKey])),
+      .in('key', [...Object.values(VIP_PLANS).flatMap(p => [p.priceKey, p.daysKey]), 'vip_token_discount_pct']),
     supabase.from('profiles').select('level').eq('id', userId).single(),
   ]);
   const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
@@ -195,12 +195,14 @@ async function vipPricing(userId) {
     const days = parseInt(settings[p.daysKey]);
     plans[name] = { base, days, price: applyVipDiscount(base, prof?.level) };
   }
-  return { plans, discountPercent };
+  // same key routes/gost.js reads when discounting a token purchase
+  const tokenDiscount = parseFloat(settings.vip_token_discount_pct);
+  return { plans, discountPercent, gostTokenDiscountPercent: Number.isFinite(tokenDiscount) ? tokenDiscount : 0 };
 }
 
 // GET /wallet/vip/price — prices with the caller's level discount applied
 router.get('/vip/price', async (req, res) => {
-  const { plans, discountPercent } = await vipPricing(req.userId);
+  const { plans, discountPercent, gostTokenDiscountPercent } = await vipPricing(req.userId);
   if (!Number.isFinite(plans.month.base) || !Number.isFinite(plans.year.base))
     return res.status(500).json({ error: 'VIP не настроен (admin_settings)' });
   res.json({
@@ -208,7 +210,10 @@ router.get('/vip/price', async (req, res) => {
     yearPrice: plans.year.price,
     monthBasePrice: plans.month.base,
     yearBasePrice: plans.year.base,
+    monthDays: plans.month.days,
+    yearDays: plans.year.days,
     discountPercent,
+    gostTokenDiscountPercent,
   });
 });
 
