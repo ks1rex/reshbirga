@@ -4,6 +4,7 @@ const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { sendTelegram } = require('../utils/telegramNotify');
+const { vipDiscountPct, applyVipDiscount } = require('../utils/vip');
 
 const router = Router();
 router.use(auth);
@@ -177,21 +178,51 @@ router.post('/withdrawals', isBanned, async (req, res) => {
 const VIP_PLANS = { month: { priceKey: 'vip_price_month', daysKey: 'vip_duration_month_days' },
                     year:  { priceKey: 'vip_price_year',  daysKey: 'vip_duration_year_days'  } };
 
+// Base prices/durations from admin_settings + the caller's level discount.
+// purchase_vip trusts the p_price it's handed, so the discount is applied here
+// (and only here) — never accept a price from the client.
+async function vipPricing(userId) {
+  const [{ data: settingsRows }, { data: prof }] = await Promise.all([
+    supabase.from('admin_settings').select('key, value')
+      .in('key', Object.values(VIP_PLANS).flatMap(p => [p.priceKey, p.daysKey])),
+    supabase.from('profiles').select('level').eq('id', userId).single(),
+  ]);
+  const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
+  const discountPercent = vipDiscountPct(prof?.level);
+  const plans = {};
+  for (const [name, p] of Object.entries(VIP_PLANS)) {
+    const base = parseFloat(settings[p.priceKey]);
+    const days = parseInt(settings[p.daysKey]);
+    plans[name] = { base, days, price: applyVipDiscount(base, prof?.level) };
+  }
+  return { plans, discountPercent };
+}
+
+// GET /wallet/vip/price — prices with the caller's level discount applied
+router.get('/vip/price', async (req, res) => {
+  const { plans, discountPercent } = await vipPricing(req.userId);
+  if (!Number.isFinite(plans.month.base) || !Number.isFinite(plans.year.base))
+    return res.status(500).json({ error: 'VIP не настроен (admin_settings)' });
+  res.json({
+    monthPrice: plans.month.price,
+    yearPrice: plans.year.price,
+    monthBasePrice: plans.month.base,
+    yearBasePrice: plans.year.base,
+    discountPercent,
+  });
+});
+
 // POST /wallet/vip — buy/extend VIP (plan: 'month' | 'year')
 router.post('/vip', isBanned, async (req, res) => {
-  const plan = VIP_PLANS[req.body.plan];
-  if (!plan) return res.status(400).json({ error: 'Некорректный план (month/year)' });
+  if (!VIP_PLANS[req.body.plan]) return res.status(400).json({ error: 'Некорректный план (month/year)' });
 
-  const { data: settingsRows } = await supabase
-    .from('admin_settings')
-    .select('key, value')
-    .in('key', [plan.priceKey, plan.daysKey]);
-  const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
-  const price = parseFloat(settings[plan.priceKey]);
-  const days  = parseInt(settings[plan.daysKey]);
-  if (!Number.isFinite(price) || !Number.isFinite(days))
+  const { plans } = await vipPricing(req.userId);
+  const { price, days, base } = plans[req.body.plan];
+  if (!Number.isFinite(base) || !Number.isFinite(days))
     return res.status(500).json({ error: 'VIP не настроен (admin_settings)' });
 
+  // price may be 0 at level 10 — purchase_vip accepts p_price >= 0 and still
+  // writes the vip_purchase transaction row, so free activation stays on ledger.
   const { data: rows, error: rpcErr } = await supabase
     .rpc('purchase_vip', { p_user_id: req.userId, p_days: days, p_price: price, p_plan: req.body.plan });
   if (rpcErr) return serverError(res, rpcErr, 'wallet:vip:rpc');

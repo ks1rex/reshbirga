@@ -4,6 +4,18 @@ const { serverError } = require('../utils/httpError');
 
 const router = Router();
 
+// GET /stats/marketplace — feed counters for both Биржа tabs at once, so the
+// UI can show both without loading the inactive tab's list. head:true → COUNT
+// only, none of the joins the /orders and /listings feeds do.
+router.get('/marketplace', async (req, res) => {
+  const [{ count: orders_count, error: e1 }, { count: listings_count, error: e2 }] = await Promise.all([
+    supabase.from('orders').select('id', { count: 'exact', head: true }).eq('status', 'open').eq('is_hidden', false),
+    supabase.from('listings').select('id', { count: 'exact', head: true }).eq('is_active', true),
+  ]);
+  if (e1 || e2) return serverError(res, e1 || e2, 'stats:marketplace');
+  res.json({ orders_count: orders_count ?? 0, listings_count: listings_count ?? 0 });
+});
+
 // GET /stats/public — homepage counters, no auth required
 router.get('/public', async (req, res) => {
   const [{ count: users_count, error: e1 }, { count: threads_count, error: e2 }, { count: orders_count, error: e3 }, { data: payouts, error: e4 }, { count: posts_count, error: e5 }] =

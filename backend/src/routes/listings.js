@@ -5,6 +5,7 @@ const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
+const { sortFeed } = require('../utils/feedSort');
 
 const router = Router();
 
@@ -75,7 +76,7 @@ router.post('/', auth, isBanned, async (req, res) => {
 
 // ── GET /listings ─────────────────────────────────────────────────────────────
 router.get('/', optionalAuth, async (req, res) => {
-  const { search, owner_id, limit } = req.query;
+  const { search, owner_id, limit, sort } = req.query;
   let q = supabase
     .from('listings')
     .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
@@ -90,12 +91,14 @@ router.get('/', optionalAuth, async (req, res) => {
 
   const { data, error } = await q;
   if (error) return serverError(res, error);
-  let result = (data ?? []).map(l => ({ ...l, owner: withIsVip(l.owner) }));
+  let result = data ?? [];
   if (search?.trim()) {
     const s = search.trim().toLowerCase();
     result = result.filter(l => l.title.toLowerCase().includes(s) || l.description.toLowerCase().includes(s));
   }
-  res.json(result);
+  // sort before withIsVip — it strips the vip_expires_at the sort keys off
+  res.json(sortFeed(result, sort, l => l.owner, 'rating_as_executor')
+    .map(l => ({ ...l, owner: withIsVip(l.owner) })));
 });
 
 // ── GET /listings/mine ────────────────────────────────────────────────────────

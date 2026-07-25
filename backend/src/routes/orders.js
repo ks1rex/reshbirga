@@ -13,6 +13,7 @@ const { sanitizeSearchTerm } = require('../utils/search');
 const { addReputation, grantAchievement } = require('../utils/reputation');
 const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
+const { sortFeed } = require('../utils/feedSort');
 
 const router = Router();
 const upload = makeUploader();
@@ -41,11 +42,11 @@ const ORDER_DETAIL_SELECT = `
 // ── FEED ─────────────────────────────────────────────────────────────────────
 
 router.get('/', optionalAuth, async (req, res) => {
-  const { search, limit } = req.query;
+  const { search, limit, sort } = req.query;
   const cap = Math.min(100, Math.max(1, parseInt(limit ?? '100', 10)));
   let q = supabase
     .from('orders')
-    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url, vip_expires_at)')
+    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url, rating_as_customer, vip_expires_at)')
     .eq('status', 'open')
     .eq('is_hidden', false)
     .order('created_at', { ascending: false })
@@ -57,7 +58,8 @@ router.get('/', optionalAuth, async (req, res) => {
   const { data: orders, error } = await q;
   if (error) return serverError(res, error);
   if (!orders?.length) return res.json([]);
-  const withVip = orders.map(o => ({ ...o, customer: withIsVip(o.customer) }));
+  const withVip = sortFeed(orders, sort, o => o.customer, 'rating_as_customer')
+    .map(o => ({ ...o, customer: withIsVip(o.customer) }));
   if (!req.userId) return res.json(withVip.map(o => ({ ...o, already_applied: false })));
   const orderIds = orders.map(o => o.id);
   const { data: apps } = await supabase
