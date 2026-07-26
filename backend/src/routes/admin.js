@@ -6,8 +6,9 @@ const { serverError } = require('../utils/httpError');
 const { sanitizeSearchTerm } = require('../utils/search');
 const { sendTelegram } = require('../utils/telegramNotify');
 const { grantAchievement } = require('../utils/reputation');
-const { withIsVip, vipDiscountPct, applyVipDiscount } = require('../utils/vip');
+const { withIsVip, vipDiscountPct, applyVipDiscount, parseLevelDiscounts, VIP_LEVELS } = require('../utils/vip');
 const { fetchAll, sumAll } = require('../utils/pagedFetch');
+const { hideExcessForUser, baseListingLimit } = require('../utils/vipExpiry');
 const scheduleWarmup = require('../jobs/scheduleWarmup');
 
 const router = Router();
@@ -783,6 +784,8 @@ router.put('/settings/:key', async (req, res) => {
 const ADMIN_SETTING_VALIDATORS = {
   withdrawal_commission_pct: 'percent',
   vip_token_discount_pct:    'percent',
+  // 10 процентов через запятую — скидка на подписку для уровней 1..10
+  vip_level_discounts:       'pct_list',
   referral_bonus_pct:        'percent',
   vip_duration_month_days:   'positive_int',
   vip_duration_year_days:    'positive_int',
@@ -802,6 +805,20 @@ function validateAdminSettingValue(key, value) {
   if (!kind) {
     return `Неизвестный ключ настройки. Допустимые ключи: ${Object.keys(ADMIN_SETTING_VALIDATORS).join(', ')}`;
   }
+  // Список процентов проверяется до числовой проверки ниже: «0,10,20,...» —
+  // не число, и общая ветка отвергла бы его.
+  if (kind === 'pct_list') {
+    const parts = String(value).split(',').map(p => p.trim());
+    if (parts.length !== VIP_LEVELS)
+      return `Нужно ровно ${VIP_LEVELS} значений через запятую — по одному на уровень`;
+    for (const p of parts) {
+      const n = Number(p);
+      if (p === '' || !Number.isFinite(n) || n < 0 || n > 100)
+        return 'Каждое значение — процент от 0 до 100';
+    }
+    return null;
+  }
+
   const num = Number(value);
   if (Number.isNaN(num)) return 'Значение должно быть числом';
   if (kind === 'percent' && (num < 0 || num > 100)) return 'Значение должно быть от 0 до 100';
@@ -918,7 +935,7 @@ router.get('/vip', async (req, res) => {
   const [settingsRes, txRes, subsRes, expiringRes] = await Promise.all([
     supabase.from('admin_settings').select('key, value')
       .in('key', ['vip_price_month', 'vip_price_year', 'vip_duration_month_days',
-                  'vip_duration_year_days', 'vip_token_discount_pct']),
+                  'vip_duration_year_days', 'vip_token_discount_pct', 'vip_level_discounts']),
     fetchAll(() => supabase.from('transactions')
       .select('amount, platform_profit, created_at')
       .eq('type', 'vip_purchase').eq('status', 'completed')),
@@ -941,6 +958,7 @@ router.get('/vip', async (req, res) => {
 
   const monthBase = num('vip_price_month', 300);
   const yearBase  = num('vip_price_year', 1500);
+  const levelDiscounts = parseLevelDiscounts(settings.vip_level_discounts);
 
   const txs = txRes.data ?? [];
   const round2 = n => Math.round(n * 100) / 100;
@@ -952,13 +970,13 @@ router.get('/vip', async (req, res) => {
     },
     gost_token_discount_pct: num('vip_token_discount_pct', 0),
     // 1..10 — те же уровни, что выдаёт utils/reputation.js
-    level_discounts: Array.from({ length: 10 }, (_, i) => {
+    level_discounts: Array.from({ length: VIP_LEVELS }, (_, i) => {
       const level = i + 1;
       return {
         level,
-        discount_pct: vipDiscountPct(level),
-        month_price: applyVipDiscount(monthBase, level),
-        year_price:  applyVipDiscount(yearBase, level),
+        discount_pct: vipDiscountPct(level, levelDiscounts),
+        month_price: applyVipDiscount(monthBase, level, levelDiscounts),
+        year_price:  applyVipDiscount(yearBase, level, levelDiscounts),
       };
     }),
     revenue:         round2(txs.reduce((s, t) => s + (parseFloat(t.platform_profit) || 0), 0)),
@@ -967,6 +985,84 @@ router.get('/vip', async (req, res) => {
     expiring_week_count: expiringRes.count ?? 0,
     subscribers:     subsRes.data ?? [],
   });
+});
+
+// POST /admin/vip/:userId/extend  { days }
+//
+// Выдать или продлить подписку вручную — без списания с баланса: это подарок
+// или компенсация, а не покупка, поэтому в transactions ничего не пишется
+// (иначе выручка VIP в «Финансах» раздулась бы деньгами, которых не было).
+// След остаётся в Telegram — тот же канал, что для подтверждений пополнений
+// и решений по спорам.
+//
+// ponytail: read-then-update, а не RPC. Ручная правка подписки — редкая
+// одиночная операция администратора; при двух одновременных продлениях одно
+// потеряется. Понадобится вести это одновременно из нескольких мест — переносить
+// в SQL-функцию рядом с purchase_vip.
+router.post('/vip/:userId/extend', async (req, res) => {
+  const days = parseInt(req.body?.days, 10);
+  if (!Number.isFinite(days) || days < 1 || days > 3650)
+    return res.status(400).json({ error: 'Число дней — от 1 до 3650' });
+
+  const { data: profile, error: findError } = await supabase
+    .from('profiles').select('nickname, vip_expires_at').eq('id', req.params.userId).maybeSingle();
+  if (findError) return serverError(res, findError, 'admin:vip:extend:lookup');
+  if (!profile) return res.status(404).json({ error: 'Пользователь не найден' });
+
+  // Дни прибавляются к остатку, как в purchase_vip: истёкшая (или отсутствующая)
+  // подписка считается от «сейчас», активная — от своей даты окончания.
+  const now = Date.now();
+  const from = Math.max(now, profile.vip_expires_at ? new Date(profile.vip_expires_at).getTime() : 0);
+  const newExpiry = new Date(from + days * 86400000).toISOString();
+
+  const { error } = await supabase
+    .from('profiles').update({ vip_expires_at: newExpiry }).eq('id', req.params.userId);
+  if (error) return serverError(res, error, 'admin:vip:extend');
+
+  sendTelegram(
+    `👑 VIP выдан вручную\n` +
+    `Пользователь: @${profile.nickname ?? req.params.userId}\n` +
+    `Дней: ${days}, подписка до ${new Date(newExpiry).toLocaleString('ru-RU')}\n` +
+    `Без списания с баланса.`
+  );
+
+  res.json({ success: true, vip_expires_at: newExpiry });
+});
+
+// POST /admin/vip/:userId/cancel — снять подписку сейчас
+router.post('/vip/:userId/cancel', async (req, res) => {
+  const { data: profile, error: findError } = await supabase
+    .from('profiles').select('nickname, vip_expires_at').eq('id', req.params.userId).maybeSingle();
+  if (findError) return serverError(res, findError, 'admin:vip:cancel:lookup');
+  if (!profile) return res.status(404).json({ error: 'Пользователь не найден' });
+  if (!profile.vip_expires_at || new Date(profile.vip_expires_at) <= new Date())
+    return res.status(400).json({ error: 'Активной подписки нет' });
+
+  // Ставим «истекла сейчас», а не null: часовой сторож (utils/vipExpiry.js)
+  // ищет именно непустую дату в прошлом, и с null пользователь никогда бы
+  // не попал под проверку лимита объявлений.
+  const now = new Date().toISOString();
+  const { error } = await supabase
+    .from('profiles').update({ vip_expires_at: now }).eq('id', req.params.userId);
+  if (error) return serverError(res, error, 'admin:vip:cancel');
+
+  // Не ждём часового прогона: сразу прячем то, что не влезает в базовый лимит.
+  let hidden = 0;
+  try {
+    hidden = await hideExcessForUser(req.params.userId, await baseListingLimit());
+  } catch (e) {
+    // Подписка уже снята — сторож доберёт лишние объявления в течение часа.
+    console.error('[admin:vip:cancel:hide]', e?.message);
+  }
+
+  sendTelegram(
+    `👑 VIP снят администратором\n` +
+    `Пользователь: @${profile.nickname ?? req.params.userId}\n` +
+    `Скрыто объявлений сверх лимита: ${hidden}\n` +
+    `Деньги не возвращаются автоматически.`
+  );
+
+  res.json({ success: true, vip_expires_at: now, hidden_items: hidden });
 });
 
 // ─── Forum moderation (admin) ─────────────────────────────────

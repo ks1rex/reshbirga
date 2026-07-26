@@ -4,7 +4,7 @@ const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { sendTelegram } = require('../utils/telegramNotify');
-const { vipDiscountPct, applyVipDiscount } = require('../utils/vip');
+const { vipDiscountPct, applyVipDiscount, parseLevelDiscounts } = require('../utils/vip');
 
 const router = Router();
 router.use(auth);
@@ -184,16 +184,21 @@ const VIP_PLANS = { month: { priceKey: 'vip_price_month', daysKey: 'vip_duration
 async function vipPricing(userId) {
   const [{ data: settingsRows }, { data: prof }] = await Promise.all([
     supabase.from('admin_settings').select('key, value')
-      .in('key', [...Object.values(VIP_PLANS).flatMap(p => [p.priceKey, p.daysKey]), 'vip_token_discount_pct']),
+      .in('key', [...Object.values(VIP_PLANS).flatMap(p => [p.priceKey, p.daysKey]),
+                  'vip_token_discount_pct', 'vip_level_discounts']),
     supabase.from('profiles').select('level').eq('id', userId).single(),
   ]);
   const settings = Object.fromEntries((settingsRows ?? []).map(r => [r.key, r.value]));
-  const discountPercent = vipDiscountPct(prof?.level);
+  // Таблица скидок по уровню — из настроек (admin_settings.vip_level_discounts),
+  // без ключа действует прежнее правило. Считается здесь, на сервере: purchase_vip
+  // доверяет переданной цене.
+  const levelDiscounts = parseLevelDiscounts(settings.vip_level_discounts);
+  const discountPercent = vipDiscountPct(prof?.level, levelDiscounts);
   const plans = {};
   for (const [name, p] of Object.entries(VIP_PLANS)) {
     const base = parseFloat(settings[p.priceKey]);
     const days = parseInt(settings[p.daysKey]);
-    plans[name] = { base, days, price: applyVipDiscount(base, prof?.level) };
+    plans[name] = { base, days, price: applyVipDiscount(base, prof?.level, levelDiscounts) };
   }
   // same key routes/gost.js reads when discounting a token purchase
   const tokenDiscount = parseFloat(settings.vip_token_discount_pct);

@@ -63,7 +63,9 @@ Chat moderation: `GET /chat-moderation` · `PATCH /chat-moderation/:msgId/review
 Site settings: `PUT /settings/:key` · `PUT /admin-settings/:key` · `GET /settings`
 Forum moderation: `GET /forum/flagged` · `POST /forum/posts/:id/approve` · `DELETE /forum/posts/:id` · `GET /forum/reports` · `POST /forum/reports/:id/resolve` · `GET /forum/categories` · `POST /forum/categories` · `PATCH /forum/categories/:id` · `DELETE /forum/categories/:id`
 Stats: `GET /stats`
-VIP: `GET /vip` — plans + per-level discount table (computed with the same `utils/vip.js` helpers the purchase uses), revenue, purchase count, active/expiring counts, and the list of active subscribers
+VIP: `GET /vip` — plans + per-level discount table (computed with the same `utils/vip.js` helpers the purchase uses, so it reflects `admin_settings.vip_level_discounts`), revenue, purchase count, active/expiring counts, and the list of active subscribers · `POST /vip/:userId/extend` (`{ days }`, 1–3650) · `POST /vip/:userId/cancel`
+
+`extend`/`cancel` deliberately write **no** `transactions` row: a manual grant isn't a purchase, and logging it would inflate VIP revenue in `/finance/summary`. The audit trail is the Telegram notification (same channel as deposit confirmations and dispute resolutions). `cancel` sets `vip_expires_at = now()` rather than `null` — `utils/vipExpiry.js` looks for a non-null past date, so `null` would leave the user permanently outside the listing-limit sweep — and then calls `hideExcessForUser()` directly so over-limit listings hide immediately instead of waiting up to an hour.
 Schedule warmup: `GET /schedule-warmup/status` · `POST /schedule-warmup/start` (`{ force? }`) · `POST /schedule-warmup/solve-captcha` · `POST /schedule-warmup/cancel` · `POST /schedule-warmup/reset`
 
 ### Paginated admin responses

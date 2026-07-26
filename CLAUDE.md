@@ -82,7 +82,7 @@ Backend ships as a Docker image (`backend/Dockerfile`) to Render; env vars are s
 
 ## Known spec deviations
 
-Several gamification/achievement thresholds and legacy endpoint names don't map 1:1 to the original spec (e.g. GOST-calculator usage tracked per token-purchase rather than per-calculation, `early_bird` measured from the first account's `created_at` rather than a configured launch date). Full list with rationale: `TODO_BACKEND.md`.
+Several gamification/achievement thresholds and legacy endpoint names don't map 1:1 to the original spec (e.g. GOST-calculator usage tracked per token-purchase rather than per-calculation; `early_bird` is dead in practice — trigger and function exist live but zero grants and no UI label at all, verified 2026-07-26). Full list with rationale: `TODO_BACKEND.md`.
 
 ## Migration history — read before touching `supabase/migrations/`
 
