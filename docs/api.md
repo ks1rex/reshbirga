@@ -28,6 +28,8 @@ No `/api` prefix — all routers are mounted directly on root in `backend/src/ap
 ## `/forum` (`routes/forum.js`)
 `GET /categories` · `GET /threads` · `GET /trending-tags` · `GET /categories/:id/threads` · `GET /threads/:id` · `POST /threads` · `POST /threads/:id/view` · `GET /threads/:id/posts` (optionalAuth) · `POST /threads/:id/posts` · `DELETE /posts/:id` · `POST /posts/:id/react` · `POST /report` · `PATCH /threads/:id/lock` (requireAdmin)
 
+`forum_categories.is_active = false` hides a category **without deleting it**: it drops out of `GET /categories`, its threads drop out of `GET /threads` (the home page's hot threads), `GET /categories/:id/threads` 404s, and `POST /threads` into it 400s. `GET /admin/forum/categories` still lists every category; the admin UI toggles the flag via `PATCH /admin/forum/categories/:id`.
+
 ## `/gost` (`routes/gost.js`) — GOST calculator token system
 `GET /token-balance` · `POST /buy-tokens` · `POST /activate-key`
 
@@ -38,6 +40,8 @@ No `/api` prefix — all routers are mounted directly on root in `backend/src/ap
 `GET /public`
 
 ## `/admin` (`routes/admin.js`) — all require admin
+Admin routes additionally require **aal2** (a verified second factor) when the calling admin has a verified MFA factor — otherwise they 403 with `{ code: 'MFA_REQUIRED' }`. Admins without MFA enrolled are unaffected. See `middleware/admin.js`.
+
 Ledger/finance: `GET /ledger` · `GET /finance/summary` · `PATCH /finance/expenses`
 Disputes: `GET /disputes` · `POST /disputes/:id/resolve`
 Deposits/withdrawals: `GET /deposits` · `POST /deposits/:id/confirm` · `POST /deposits/:id/reject` · `GET /withdrawals` · `POST /withdrawals/:id/confirm` · `POST /withdrawals/:id/reject`
@@ -48,6 +52,19 @@ Chat moderation: `GET /chat-moderation` · `PATCH /chat-moderation/:msgId/review
 Site settings: `PUT /settings/:key` · `PUT /admin-settings/:key` · `GET /settings`
 Forum moderation: `GET /forum/flagged` · `POST /forum/posts/:id/approve` · `DELETE /forum/posts/:id` · `GET /forum/reports` · `POST /forum/reports/:id/resolve` · `GET /forum/categories` · `POST /forum/categories` · `PATCH /forum/categories/:id` · `DELETE /forum/categories/:id`
 Stats: `GET /stats`
+Schedule warmup: `GET /schedule-warmup/status` · `POST /schedule-warmup/start` (`{ force? }`) · `POST /schedule-warmup/solve-captcha` · `POST /schedule-warmup/cancel` · `POST /schedule-warmup/reset`
+
+### Paginated admin responses
+`GET /ledger` and `GET /users` are **paginated envelopes**, not bare arrays:
+
+| Endpoint | Query | Response |
+|---|---|---|
+| `GET /ledger` | `type`, `nickname`, `date_from`, `date_to`, `page` (1), `limit` (100, max 5000) | `{ entries, total, page, limit }` |
+| `GET /users` | `search` (nickname **or** email), `filter=banned\|admins\|vip`, `page` (1), `limit` (50, max 500) | `{ users, total, page, limit }` |
+
+Every filter on both runs in SQL, so `total` counts the filtered set. `/ledger`'s `nickname` used to be applied in Node *after* a hard 500-row fetch, which hid older matches; `/users` used to return every profile row plus a 1000-user page of the GoTrue admin API. Email now comes from `profiles.email` (the column `GET /profile` already reads), so no auth-admin call is involved.
+
+`GET /stats` and `GET /finance/summary` aggregate over **all** rows via `utils/pagedFetch.js` — a single PostgREST select silently stops at `db-max-rows` (1000), and `/stats` additionally had explicit `.limit(2000)` caps. `/stats` gained `vip_users` and `orders_total`; `/finance/summary` gained `vip_revenue`, `vip_purchases_count`, `vip_active_count` (VIP purchases were missing from platform profit entirely).
 
 ## Known spec deviations (see `TODO_BACKEND.md` for full detail)
 - `market_orders`/`market_services` don't exist as separate concepts — use `orders`/`listings`.

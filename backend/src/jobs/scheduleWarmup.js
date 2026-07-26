@@ -1,4 +1,6 @@
 const supabase = require('../supabase_client');
+const { fetchAll } = require('../utils/pagedFetch');
+const { sendTelegram } = require('../utils/telegramNotify');
 
 const GUBKIN_API = 'https://lk.gubkin.ru/schedule/api/api.php';
 const DEFAULT_STUDY_ID = 62;
@@ -10,6 +12,7 @@ const GUBKIN_HEADERS = {
 };
 
 let shouldCancel = false;
+let forceRefetch = false;
 
 async function getFreshCaptcha() {
   try {
@@ -110,6 +113,18 @@ async function saveToCache(key, data, ttlHours) {
   }, { onConflict: 'cache_key' });
 }
 
+// Every cache key that's still valid. This is what makes a warmup resumable:
+// a run that died (captcha, crash, restart, cancel) already persisted every
+// key it managed to fetch, so the next run just skips them instead of
+// re-fetching thousands of schedules from the start.
+async function loadWarmCacheKeys() {
+  const { data } = await fetchAll(() => supabase
+    .from('schedule_cache')
+    .select('cache_key')
+    .gt('expires_at', new Date().toISOString()));
+  return new Set((data ?? []).map(r => r.cache_key));
+}
+
 function getThreeWeekDates() {
   const dates = [];
   const now = new Date();
@@ -126,9 +141,12 @@ function getThreeWeekDates() {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function startWarmup() {
+// `force: true` re-fetches keys that are still warm in schedule_cache;
+// otherwise the run resumes and only fills the gaps.
+async function startWarmup({ force = false } = {}) {
   shouldCancel = false;
-  await updateState({ status: 'running', progress_current: 0, progress_total: 0, last_error: null });
+  forceRefetch = force;
+  await updateState({ status: 'running', progress_current: 0, progress_total: 0, last_error: null, progress_step: null });
   try {
     const { cookie, imageBase64 } = await getFreshCaptcha();
     await updateState({ status: 'waiting_captcha', session_cookie: cookie, captcha_image_base64: imageBase64 });
@@ -154,22 +172,52 @@ async function submitCaptchaAndContinue(answer) {
   return { success: true };
 }
 
+// Manual escape hatch for a wedged 'running'/'waiting_captcha' state. The
+// in-process cancel flag lives in this module, so a restart mid-run (Render
+// redeploy, crash) leaves the DB row saying 'running' with nobody working on
+// it, and /start refuses to launch. This clears it; progress in
+// schedule_cache is untouched, so the next run resumes where it stopped.
+async function resetWarmup() {
+  shouldCancel = true;
+  await updateState({
+    status: 'idle',
+    captcha_image_base64: null,
+    session_cookie: null,
+    progress_step: null,
+    last_error: null,
+  });
+}
+
 async function runFullWarmup(cookie) {
   try {
-    const facData = await gubkinFetch(cookie, { act: 'list', method: 'getFaculties' });
-    await saveToCache('faculties', facData.rows, 30);
+    const warm = forceRefetch ? new Set() : await loadWarmCacheKeys();
+    let skipped = 0;
+
+    if (forceRefetch || !warm.has('faculties')) {
+      const facData = await gubkinFetch(cookie, { act: 'list', method: 'getFaculties' });
+      await saveToCache('faculties', facData.rows, 30);
+    } else skipped++;
     await updateState({ progress_step: 'faculties done' });
 
     const allGroups = [];
     for (const facultyId of MOSCOW_FACULTY_IDS) {
       if (shouldCancel) { await updateState({ status: 'idle' }); return; }
+      const key = `groups_${facultyId}`;
       try {
-        const grpData = await gubkinFetch(cookie, { act: 'list', method: 'getFacultyGroups', facultyId });
-        const groups = grpData.rows || [];
-        await saveToCache(`groups_${facultyId}`, groups, 30);
-        allGroups.push(...groups.map(g => g.id));
-        await updateState({ progress_step: `groups_${facultyId} done`, progress_current: allGroups.length });
-        await sleep(400);
+        if (!forceRefetch && warm.has(key)) {
+          // Already warm — but we still need the group ids for the schedule
+          // pass below, so read them back out of the cache instead of the API.
+          const { data: row } = await supabase.from('schedule_cache').select('data').eq('cache_key', key).maybeSingle();
+          allGroups.push(...((row?.data ?? []).map(g => g.id)));
+          skipped++;
+        } else {
+          const grpData = await gubkinFetch(cookie, { act: 'list', method: 'getFacultyGroups', facultyId });
+          const groups = grpData.rows || [];
+          await saveToCache(key, groups, 30);
+          allGroups.push(...groups.map(g => g.id));
+          await sleep(400);
+        }
+        await updateState({ progress_step: `${key} done`, progress_current: allGroups.length });
       } catch (e) {
         console.error(`[Warmup] Faculty ${facultyId}:`, e.message);
       }
@@ -182,11 +230,18 @@ async function runFullWarmup(cookie) {
     for (const groupId of allGroups) {
       if (shouldCancel) { await updateState({ status: 'idle' }); return; }
       for (const date of dates) {
+        const key = `schedule_${groupId}_${date}`;
+        if (!forceRefetch && warm.has(key)) {
+          skipped++;
+          done++;
+          await updateState({ progress_current: done, progress_total: totalSteps });
+          continue; // no API call, no sleep — resumed keys cost nothing
+        }
         try {
           const schedData = await gubkinFetch(cookie, { act: 'schedule', date, groupId, studyId: DEFAULT_STUDY_ID });
           const orgs = schedData.rows?.organizations || [];
           const moscow = orgs.find(o => o.id === 0) || orgs[0];
-          await saveToCache(`schedule_${groupId}_${date}`, {
+          await saveToCache(key, {
             week: schedData.rows?.week?.weekRussia,
             timeChunks: moscow?.lessonsTimeChunks || [],
             lessons: moscow?.lessons || [],
@@ -200,9 +255,10 @@ async function runFullWarmup(cookie) {
               status: 'waiting_captcha',
               session_cookie: fresh.cookie,
               captcha_image_base64: fresh.imageBase64,
-              progress_step: `schedule_${groupId}_${date}`,
+              progress_step: key,
               last_error: 'Session expired mid-warmup, need new captcha',
             });
+            sendTelegram(`🔐 Прогрев расписания: сессия истекла, нужна новая капча (${done}/${totalSteps})`);
             return;
           }
         }
@@ -212,8 +268,8 @@ async function runFullWarmup(cookie) {
       }
     }
 
-    await updateState({ status: 'done', last_run_at: new Date().toISOString() });
-    console.log(`[Warmup] Done! Success: ${success}, Errors: ${errors}`);
+    await updateState({ status: 'done', last_run_at: new Date().toISOString(), progress_step: `готово: ${success} новых, ${skipped} из кэша, ${errors} ошибок` });
+    console.log(`[Warmup] Done! Success: ${success}, Skipped(cached): ${skipped}, Errors: ${errors}`);
   } catch (e) {
     console.error('[Warmup ERROR]', { message: e.message, stack: e.stack, name: e.name, cause: e.cause });
     await updateState({ status: 'error', last_error: e.message });
@@ -222,4 +278,55 @@ async function runFullWarmup(cookie) {
 
 function cancelWarmup() { shouldCancel = true; }
 
-module.exports = { startWarmup, submitCaptchaAndContinue, cancelWarmup, getState };
+// ── Automatic scheduling ──────────────────────────────────────
+//
+// A warmup can't run fully unattended — step one is a captcha only a human can
+// solve. So the schedule auto-*starts* the run and pings Telegram that a
+// captcha is waiting; everything after that is unattended.
+//
+// Interval (hours) comes from admin_settings.warmup_auto_hours; 0/unset = off.
+const SCHEDULE_TICK_MS = 15 * 60 * 1000;
+let lastSeenProgress = null; // for stale-'running' detection, see below
+
+async function warmupScheduleTick() {
+  const { data: row } = await supabase
+    .from('admin_settings').select('value').eq('key', 'warmup_auto_hours').maybeSingle();
+  const hours = parseFloat(row?.value);
+  if (!Number.isFinite(hours) || hours <= 0) return;
+
+  const state = await getState();
+  if (!state) return;
+
+  // Stale 'running': progress hasn't moved for two consecutive ticks (30 min).
+  // Covers the restart case too — after a redeploy nothing is driving the run,
+  // so progress_current can never change again.
+  if (state.status === 'running') {
+    const key = `${state.progress_current}/${state.progress_total}`;
+    if (lastSeenProgress === key) {
+      lastSeenProgress = null;
+      await updateState({ status: 'error', last_error: 'Прогрев зависал в статусе «выполняется» и был сброшен автоматически' });
+      sendTelegram('⚠️ Прогрев расписания зависал в статусе «выполняется» — сброшен автоматически');
+      return;
+    }
+    lastSeenProgress = key;
+    return;
+  }
+  lastSeenProgress = null;
+
+  if (state.status === 'waiting_captcha') return; // already waiting on a human
+  if (!['idle', 'done', 'error'].includes(state.status)) return;
+
+  const lastRun = state.last_run_at ? new Date(state.last_run_at).getTime() : 0;
+  if (Date.now() - lastRun < hours * 3600000) return;
+
+  await startWarmup();
+  sendTelegram('🔐 Автопрогрев расписания запущен — нужно ввести капчу в админке (Прогрев расписания)');
+}
+
+function startWarmupScheduleJob() {
+  setInterval(() => {
+    warmupScheduleTick().catch(err => console.error('[warmup-schedule]', err?.message));
+  }, SCHEDULE_TICK_MS);
+}
+
+module.exports = { startWarmup, submitCaptchaAndContinue, cancelWarmup, resetWarmup, getState, startWarmupScheduleJob };

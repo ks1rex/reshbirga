@@ -7,6 +7,7 @@ const { detectContactInfo } = require('../utils/contactDetector');
 const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
 const { withIsVip } = require('../utils/vip');
+const { sendTelegram } = require('../utils/telegramNotify');
 
 const router = Router();
 const upload = makeUploader();
@@ -88,6 +89,18 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
     .single();
 
   if (msgErr) return serverError(res, msgErr);
+
+  // Flagged for contact-info in a chat where it isn't sanctioned — same
+  // notification treatment the forum's AI flags already get, so admins don't
+  // have to poll /admin/chat-moderation to notice.
+  if (contactWarning) {
+    const { data: senderProf } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
+    sendTelegram(
+      `🚩 Чат: подозрение на передачу контактов\n` +
+      `Отправитель: @${senderProf?.nickname ?? req.userId}\n` +
+      `Чат: ${convId}\n\n${content.slice(0, 300)}`
+    );
+  }
 
   // Upload files to chat-attachments bucket
   const attachments = [];

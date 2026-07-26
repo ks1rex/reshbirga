@@ -397,9 +397,10 @@ async function run() {
   // ── Step 12: Ledger visible to admin ─────────────────────────────────────
   console.log('\nStep 12 — GET /admin/ledger');
   try {
+    // Ответ стал пагинированным: { entries, total, page, limit }
     const r = await api('GET', '/admin/ledger', adminToken, null);
-    if (r.status === 200 && Array.isArray(r.body))
-      ok(12, `GET /admin/ledger → 200, ${r.body.length} entries`);
+    if (r.status === 200 && Array.isArray(r.body?.entries) && typeof r.body.total === 'number')
+      ok(12, `GET /admin/ledger → 200, ${r.body.entries.length}/${r.body.total} entries`);
     else
       fail(12, 'GET /admin/ledger', `status=${r.status} ${JSON.stringify(r.body).slice(0, 80)}`);
   } catch (e) { fail(12, 'Ledger', e.message); }

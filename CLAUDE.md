@@ -13,7 +13,7 @@ Repo is in Russian (UI text, commit-adjacent docs, error messages). Match that w
 - Backend: Node.js 20 + Express, deployed to Render as Docker
 - DB/Auth/Storage: Supabase (Postgres + RLS + S3 storage) — schema details in `@docs/schema.md`
 - AI moderation: DeepSeek API (`deepseek-chat`)
-- Notifications: Telegram Bot API, called synchronously from Express (`backend/src/utils/telegramNotify.js`, used by `routes/admin.js`/`routes/orders.js`) — an earlier Supabase Edge Function path (`notify-admin-events`) was dead code and removed (2026-07-16), see `docs/schema.md`
+- Notifications: Telegram Bot API, called synchronously from Express (`backend/src/utils/telegramNotify.js`) — an earlier Supabase Edge Function path (`notify-admin-events`) was dead code and removed (2026-07-16), see `docs/schema.md`. Current senders: `routes/admin.js` (deposit confirmed, referral bonus, dispute resolved), `routes/orders.js` (new dispute), `routes/wallet.js` (deposit/withdrawal requests), `routes/support.js` (new support ticket), `routes/conversations.js` (regex contact-info flag in a chat), `utils/aiChatCheck.js` (AI chat flags, one digest per order), `utils/forumModerator.js` (forum AI flags), `jobs/scheduleWarmup.js` (autostart needs captcha / stuck run reset)
 - `frontend/` in this repo is **deprecated and unused**. The real, active UI lives in the separate `ebu.gubkin` repository.
 
 ## Commands
@@ -64,11 +64,15 @@ Backend ships as a Docker image (`backend/Dockerfile`) to Render; env vars are s
 
 **Route → middleware → Supabase.** Routes in `backend/src/routes/*.js` are thin: auth via `backend/src/middleware/auth.js` (verifies Supabase JWT), ban check via `isBanned.js`, admin check via `admin.js`, then direct calls through `backend/src/supabase_client.js` (service-role client, bypasses RLS — so routes are the actual authorization boundary, not the DB). Shared logic lives in `backend/src/utils/`: `contactDetector.js` (regex contact-info detection), `aiChatCheck.js` (DeepSeek moderation call), `autoConfirm.js` (auto-confirms orders after `AUTO_CONFIRM_HOURS`), `reputation.js`, `forumModerator.js`, `search.js`, `telegramNotify.js`.
 
-**Background jobs run in-process.** `startForumAIJob()` (forum AI moderation, every 10 min) is kicked off directly in `app.js` — no external scheduler/queue.
+**Background jobs run in-process.** All kicked off directly in `app.js` — no external scheduler/queue: `startForumAIJob()` (forum AI moderation, every 10 min), `startVipExpiryJob()` (VIP expiry sweep, hourly), `startWarmupScheduleJob()` (every 15 min; a no-op unless `admin_settings.warmup_auto_hours > 0`). The warmup job doubles as the watchdog that clears a `schedule_warmup_state.status = 'running'` row whose progress has stopped moving — the cancel flag lives in-process, so a redeploy mid-run would otherwise wedge the state forever (there's also a manual `POST /admin/schedule-warmup/reset`).
+
+**Aggregates must page.** PostgREST caps a response at `db-max-rows` (1000) *silently* — no error, just fewer rows. `backend/src/utils/pagedFetch.js` (`fetchAll`/`sumAll`) walks the pages; use it for any "sum/count everything" query. `/admin/stats` and `/admin/finance/summary` were both understating figures for exactly this reason (plus explicit `.limit(2000)` caps in `/stats`).
 
 **Money paths are not atomic where you'd expect.** `addReputation` in `backend/src/utils/reputation.js` is read-then-update, not a DB transaction — acceptable for reputation points but flagged there with a `ponytail:` comment as unsafe for anything money-related. Actual escrow/wallet balance changes go through Supabase RPCs/triggers instead — check `@docs/schema.md` for the existing atomic RPC before adding new balance-mutating code in Express.
 
 **Admin panel** (in the `ebu.gubkin` UI) requires `profiles.is_admin = true`; first admin must be granted manually via SQL (`UPDATE profiles SET is_admin = true WHERE id = '<uuid>'`).
+
+**Admin 2FA is per-admin and enforced server-side.** `middleware/auth.js` decodes the `aal` claim off the (already GoTrue-verified) JWT into `req.authAal`; `middleware/admin.js` rejects `aal1` with `{ code: 'MFA_REQUIRED' }` **only** for admins who have a verified factor (`req.user.factors`). This matters because Supabase issues a fully working `aal1` session on password alone even for MFA-enrolled accounts — without the server-side check, 2FA would be decorative. Gating only enrolled admins is deliberate: otherwise the first admin to turn MFA on locks out everyone else. Enrollment UI is Supabase's native TOTP MFA (`supabase.auth.mfa.*`) in `ebu.gubkin`'s `src/pages/Admin/TwoFactor.tsx`; the login/session challenge lives in `src/pages/Login.tsx` and `src/components/AdminRoute.tsx`. No custom secret storage, no QR library.
 
 **Middleware stack** (`backend/src/app.js`, in order): `helmet` (CSP/COEP disabled — this is a JSON API, no server-rendered HTML), `express-rate-limit` (300 req/min per IP, generous enough for 5s chat polling), `cors` (origin allowlist from `FRONTEND_URL`, comma-separated), `express.json()`. App trusts the first proxy hop (`trust proxy = 1`) for correct client IPs behind Render.
 

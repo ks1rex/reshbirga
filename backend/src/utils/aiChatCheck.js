@@ -1,4 +1,5 @@
 const supabase = require('../supabase_client');
+const { sendTelegram } = require('./telegramNotify');
 
 const SYSTEM_PROMPT = 'Ты модератор чата маркетплейса. Определи, пытается ли пользователь в этом сообщении ЗАМАСКИРОВАННО передать контактные данные (телефон, ник в соцсети/мессенджере, email, предложение общаться \'в другом месте\') — например, цифры написаны словами, через странные разделители, на другом языке/раскладке, или намёками. Ответь ТОЛЬКО JSON: {"suspicious": true} или {"suspicious": false}, без пояснений.';
 
@@ -65,6 +66,7 @@ async function runAIChatCheck(orderId) {
     const now = new Date().toISOString();
 
     // (c-d) Check each message sequentially, update regardless of result
+    let flagged = 0;
     for (const msg of messages) {
       let suspicious = false;
       try {
@@ -74,8 +76,18 @@ async function runAIChatCheck(orderId) {
         // Network/parse error — mark as checked with suspicious=false
       }
       const updates = { ai_checked_at: now };
-      if (suspicious) updates.ai_suspected = true;
+      if (suspicious) { updates.ai_suspected = true; flagged++; }
       await supabase.from('messages').update(updates).eq('id', msg.id);
+    }
+
+    // One digest per order, not per message: this runs over a whole finished
+    // chat at once, so per-message pings would arrive as a burst.
+    if (flagged > 0) {
+      sendTelegram(
+        `🚩 Чат: AI-модерация\n` +
+        `Заказ: ${orderId}\n` +
+        `Подозрительных сообщений: ${flagged} — см. Модерация в админке`
+      );
     }
   } catch (err) {
     console.error('[aiChatCheck] Error for order', orderId, ':', err?.message ?? err);

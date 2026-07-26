@@ -37,11 +37,20 @@ async function bumpForumPostsCount(userId) {
   if (count === 200) await grantAchievement(supabase, userId, 'posts_200');
 }
 
+// Категории с is_active = false скрыты от пользователей, но не удалены —
+// админка переключает флаг через PATCH /admin/forum/categories/:id, а
+// /admin/forum/categories продолжает отдавать полный список.
+async function activeCategoryIds() {
+  const { data } = await supabase.from('forum_categories').select('id').eq('is_active', true);
+  return (data ?? []).map(c => c.id);
+}
+
 // ── GET /forum/categories ─────────────────────────────────────────────────────
 router.get('/categories', async (req, res) => {
   const { data: cats, error } = await supabase
     .from('forum_categories')
     .select('*')
+    .eq('is_active', true)
     .order('sort_order');
   if (error) return serverError(res, error, 'forum:categories');
 
@@ -70,9 +79,16 @@ router.get('/threads', async (req, res) => {
   const AUTHOR   = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at)';
   const CATEGORY = 'category:forum_categories(id, name, icon_name)';
 
+  // Скрытая категория не должна протекать в «горячие темы» на главной.
+  // Фильтр по id, а не по вложенному forum_categories.is_active: список
+  // категорий крошечный, а лишний embed-фильтр — лишний способ сломать главную.
+  const activeIds = await activeCategoryIds();
+  if (!activeIds.length) return res.json([]);
+
   let q = supabase
     .from('forum_threads')
-    .select(`id, title, posts_count, views_count, created_at, last_post_at, ${AUTHOR}, ${CATEGORY}`);
+    .select(`id, title, posts_count, views_count, created_at, last_post_at, ${AUTHOR}, ${CATEGORY}`)
+    .in('category_id', activeIds);
 
   if (sort === 'date')      q = q.order('created_at', { ascending: false });
   else if (sort === 'top')  q = q.order('views_count', { ascending: false });
@@ -98,6 +114,11 @@ router.get('/categories/:id/threads', async (req, res) => {
 
   const AUTHOR = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at)';
   const LAST   = 'last_post_author:profiles!forum_threads_last_post_author_id_fkey(id, nickname, avatar_url)';
+
+  // Прямая ссылка на скрытую категорию — 404, иначе «скрытие» ничего не скрывает
+  const { data: cat } = await supabase
+    .from('forum_categories').select('is_active').eq('id', req.params.id).maybeSingle();
+  if (!cat || cat.is_active === false) return res.status(404).json({ error: 'Категория не найдена' });
 
   let q = supabase
     .from('forum_threads')
@@ -136,6 +157,10 @@ router.post('/threads', auth, isBanned, async (req, res) => {
   }
   if (title.trim().length > 200) return res.status(400).json({ error: 'Заголовок не более 200 символов' });
   if (content.trim().length > 10000) return res.status(400).json({ error: 'Текст не более 10 000 символов' });
+
+  const { data: cat } = await supabase
+    .from('forum_categories').select('is_active').eq('id', category_id).maybeSingle();
+  if (!cat || cat.is_active === false) return res.status(400).json({ error: 'Категория недоступна' });
 
   const mod = await moderateSync(content, req.userId);
   if (mod.blocked) {

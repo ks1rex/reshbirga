@@ -62,6 +62,8 @@ S3-compatible bucket configured in `0012_storage_bucket.sql`, used for order/mes
 ## Business parameters (`admin_settings`)
 Key/value table, not covered by a migration entry above since it holds tunable business params rather than schema. Current documented values: `withdrawal_commission_pct` = 10 (platform cut, held on withdrawal — see root `CLAUDE.md`), `referral_bonus_pct` = 5 (referrer's cut of a referred user's first 3 deposits, default fallback in `backend/src/routes/admin.js` line 444 if the key is unset). Check this table directly for current values before hardcoding a rate elsewhere.
 
+Accepted keys are whitelisted (with a per-key validator) in `ADMIN_SETTING_VALIDATORS`, `backend/src/routes/admin.js` — `PUT /admin/admin-settings/:key` rejects anything not listed, so a new tunable needs an entry there. Non-financial keys currently in that list: `platform_expenses` (written by `PATCH /admin/finance/expenses`, not the generic setter) and `warmup_auto_hours` (schedule-warmup autostart interval in hours; `0`/unset = off, see `jobs/scheduleWarmup.js`).
+
 ## RLS boundary
 Every listed table has RLS enabled, but the backend's Supabase client (`backend/src/supabase_client.js`) is service-role and bypasses RLS. **Express routes are the real authorization boundary**, not the database.
 

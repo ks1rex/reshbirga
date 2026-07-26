@@ -2,6 +2,7 @@ const { Router } = require('express');
 const auth = require('../middleware/auth');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
+const { sendTelegram } = require('../utils/telegramNotify');
 
 const router = Router();
 router.use(auth);
@@ -40,6 +41,13 @@ router.post('/tickets', async (req, res) => {
     content: message.trim(),
     is_contact_info: false,
   });
+
+  const { data: prof } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
+  sendTelegram(
+    `🆘 Новое обращение в поддержку\n` +
+    `Пользователь: @${prof?.nickname ?? req.userId}\n` +
+    `Тема: ${subject.trim().slice(0, 120)}\n\n${message.trim().slice(0, 300)}`
+  );
 
   res.status(201).json({ ticket_id: ticket.id, conversation_id: conv.id });
 });

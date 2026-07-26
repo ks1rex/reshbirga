@@ -6,38 +6,51 @@ const { serverError } = require('../utils/httpError');
 const { sanitizeSearchTerm } = require('../utils/search');
 const { sendTelegram } = require('../utils/telegramNotify');
 const { grantAchievement } = require('../utils/reputation');
+const { withIsVip } = require('../utils/vip');
+const { fetchAll, sumAll } = require('../utils/pagedFetch');
 const scheduleWarmup = require('../jobs/scheduleWarmup');
 
 const router = Router();
 router.use(auth, adminMiddleware);
 
-// GET /admin/ledger — read-only transaction log with filters
+// GET /admin/ledger?type=&nickname=&date_from=&date_to=&page=1&limit=100
+// Filters (including nickname) are applied in SQL, so pagination counts the
+// *filtered* set — the old version fetched 500 newest rows and only then
+// filtered by nickname in Node, which silently hid older matches.
 router.get('/ledger', async (req, res) => {
   const { type, nickname, date_from, date_to } = req.query;
+  const pg  = Math.max(1, parseInt(req.query.page) || 1);
+  const lim = Math.min(5000, Math.max(1, parseInt(req.query.limit) || 100));
+  const offset = (pg - 1) * lim;
+
+  // Nickname → user_id, in SQL. No match = empty result, not "no filter".
+  let userIds = null;
+  if (nickname?.trim()) {
+    const { data: profs } = await supabase
+      .from('profiles').select('id').ilike('nickname', `%${nickname.trim()}%`).limit(500);
+    userIds = (profs ?? []).map(p => p.id);
+    if (!userIds.length) return res.json({ entries: [], total: 0, page: pg, limit: lim });
+  }
 
   let q = supabase
     .from('transactions')
     .select(`
-      id, type, amount, status, created_at, order_id,
-      user:profiles!transactions_user_id_fkey(id, nickname)
-    `)
+      id, type, amount, status, created_at, order_id, platform_profit,
+      user:profiles!transactions_user_id_fkey(id, nickname, vip_expires_at)
+    `, { count: 'exact' })
     .order('created_at', { ascending: false })
-    .limit(500);
+    .range(offset, offset + lim - 1);
 
   if (type) q = q.eq('type', type);
   if (date_from) q = q.gte('created_at', date_from);
   if (date_to)   q = q.lte('created_at', date_to);
+  if (userIds)   q = q.in('user_id', userIds);
 
-  const { data, error } = await q;
+  const { data, error, count } = await q;
   if (error) return serverError(res, error);
 
-  let result = data ?? [];
-  if (nickname?.trim()) {
-    const s = nickname.trim().toLowerCase();
-    result = result.filter(tx => tx.user?.nickname?.toLowerCase().includes(s));
-  }
-
-  res.json(result);
+  const entries = (data ?? []).map(tx => ({ ...tx, user: withIsVip(tx.user) }));
+  res.json({ entries, total: count ?? 0, page: pg, limit: lim });
 });
 
 // ─── Disputes ───────────────────────────────────────────────
@@ -194,10 +207,17 @@ router.patch('/chat-moderation/:msgId/review', async (req, res) => {
 // ─── Stats ──────────────────────────────────────────────────
 
 // GET /admin/stats
+// Counts and sums cover *all* rows: the aggregates used to be capped at the
+// newest 2000 orders / 2000 withdrawals, so the dashboard understated volume
+// and commission as soon as the platform passed that mark. Row-scanning
+// queries go through fetchAll (see utils/pagedFetch.js) — PostgREST truncates
+// a single response at 1000 rows without erroring.
 router.get('/stats', async (req, res) => {
+  const nowIso = new Date().toISOString();
   const [
     totalUsersRes,
     bannedUsersRes,
+    vipUsersRes,
     ordersRawRes,
     completedRes,
     openDisputesRes,
@@ -206,18 +226,22 @@ router.get('/stats', async (req, res) => {
   ] = await Promise.all([
     supabase.from('profiles').select('id', { count: 'exact', head: true }),
     supabase.from('profiles').select('id', { count: 'exact', head: true }).eq('is_banned', true),
-    supabase.from('orders').select('status').limit(2000),
-    supabase.from('orders').select('final_amount, base_amount').eq('status', 'completed').limit(2000),
+    supabase.from('profiles').select('id', { count: 'exact', head: true }).gt('vip_expires_at', nowIso),
+    fetchAll(() => supabase.from('orders').select('status')),
+    fetchAll(() => supabase.from('orders').select('final_amount, base_amount').eq('status', 'completed')),
     supabase.from('disputes').select('id', { count: 'exact', head: true }).eq('status', 'open'),
     supabase.from('support_tickets').select('id', { count: 'exact', head: true }).in('status', ['open', 'answered']),
     // Commission moved from deposit to withdrawal (stage 1) — deposits are 1:1 now,
     // so confirmed_amount - credited_amount on deposit_requests is always 0. Source
     // from transactions.platform_profit on completed withdrawals instead, matching
     // /admin/finance/summary's commission_regular.
-    supabase.from('transactions').select('platform_profit').eq('type', 'withdrawal').eq('status', 'completed').limit(2000),
+    sumAll(
+      () => supabase.from('transactions').select('platform_profit').eq('type', 'withdrawal').eq('status', 'completed'),
+      'platform_profit',
+    ),
   ]);
 
-  const errs = [totalUsersRes, bannedUsersRes, ordersRawRes, completedRes, openDisputesRes, openTicketsRes, withdrawalCommissionRes]
+  const errs = [totalUsersRes, bannedUsersRes, vipUsersRes, ordersRawRes, completedRes, openDisputesRes, openTicketsRes, withdrawalCommissionRes]
     .map((r, i) => r.error ? `[${i}] ${r.error.message}` : null).filter(Boolean);
   if (errs.length) console.error('[admin/stats] query errors:', errs.join(' | '));
 
@@ -227,11 +251,7 @@ router.get('/stats', async (req, res) => {
   }
 
   const completed = completedRes.data ?? [];
-  const total_commission_earned = Math.round(
-    (withdrawalCommissionRes.data ?? []).reduce(
-      (s, t) => s + parseFloat(t.platform_profit ?? 0), 0
-    ) * 100
-  ) / 100;
+  const total_commission_earned = withdrawalCommissionRes.total ?? 0;
   const total_volume = Math.round(
     completed.reduce((s, o) => s + parseFloat(o.final_amount ?? o.base_amount ?? 0), 0) * 100
   ) / 100;
@@ -239,6 +259,8 @@ router.get('/stats', async (req, res) => {
   res.json({
     total_users:                totalUsersRes.count ?? 0,
     banned_users:               bannedUsersRes.count ?? 0,
+    vip_users:                  vipUsersRes.count ?? 0,
+    orders_total:               (ordersRawRes.data ?? []).length,
     orders_by_status,
     total_commission_earned:    isNaN(total_commission_earned) ? 0 : total_commission_earned,
     total_volume:               isNaN(total_volume) ? 0 : total_volume,
@@ -250,45 +272,44 @@ router.get('/stats', async (req, res) => {
 
 // ─── Users ──────────────────────────────────────────────────
 
-// GET /admin/users?search=&filter=all|banned|admins
+// GET /admin/users?search=&filter=all|banned|admins|vip&page=1&limit=50
+// Everything — filter, search, paging — happens in SQL. The previous version
+// loaded every profile row plus a 1000-user page of the GoTrue admin API on
+// each request and filtered in Node; email comes off `profiles.email` (same
+// column GET /profile reads), so no auth API call is needed at all.
 router.get('/users', async (req, res) => {
   const { search, filter } = req.query;
-
-  // Fetch auth users for emails via service-role admin API.
-  // @supabase/auth-js's listUsers() defaults an omitted `page` to '' (empty
-  // string, not a number) and sends it straight through as ?page= to GoTrue's
-  // /admin/users, which 500s on the empty value — must always pass page
-  // explicitly. Guard perPage the same way in case this ever becomes
-  // configurable from the client.
-  const page    = Number(req.query.page) || 1;
-  const perPage = Number(req.query.per_page) || 1000;
-  const { data: { users: authUsers }, error: authErr } = await supabase.auth.admin.listUsers({ page, perPage });
-  if (authErr) return serverError(res, authErr);
-
-  const emailMap = {};
-  for (const u of (authUsers ?? [])) emailMap[u.id] = u.email ?? null;
+  const pg  = Math.max(1, parseInt(req.query.page) || 1);
+  const lim = Math.min(500, Math.max(1, parseInt(req.query.limit) || 50));
+  const offset = (pg - 1) * lim;
 
   let q = supabase
     .from('profiles')
-    .select('id, nickname, is_admin, is_banned, rating_as_customer, rating_as_executor, reviews_count_customer, reviews_count_executor, balance, created_at')
-    .order('created_at', { ascending: false });
+    .select(`id, nickname, email, avatar_url, is_admin, is_banned,
+             rating_as_customer, rating_as_executor,
+             reviews_count_customer, reviews_count_executor,
+             level, reputation, balance, vip_expires_at, created_at`, { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + lim - 1);
 
-  if (filter === 'banned') q = q.eq('is_banned', true);
+  if (filter === 'banned')      q = q.eq('is_banned', true);
   else if (filter === 'admins') q = q.eq('is_admin', true);
+  else if (filter === 'vip')    q = q.gt('vip_expires_at', new Date().toISOString());
 
-  const { data: profiles, error } = await q;
+  const s = sanitizeSearchTerm(search);
+  if (s) q = q.or(`nickname.ilike.%${s}%,email.ilike.%${s}%`);
+
+  const { data, error, count } = await q;
   if (error) return serverError(res, error);
 
-  let result = (profiles ?? []).map(p => ({ ...p, email: emailMap[p.id] ?? null }));
+  // Admins see the raw expiry date (unlike public profile views, which only get
+  // the is_vip boolean via withIsVip) — they need it to answer "until when?".
+  const users = (data ?? []).map(p => ({
+    ...p,
+    is_vip: !!p.vip_expires_at && new Date(p.vip_expires_at) > new Date(),
+  }));
 
-  if (search?.trim()) {
-    const s = search.trim().toLowerCase();
-    result = result.filter(p =>
-      p.nickname?.toLowerCase().includes(s) || p.email?.toLowerCase().includes(s)
-    );
-  }
-
-  res.json(result);
+  res.json({ users, total: count ?? 0, page: pg, limit: lim });
 });
 
 // PATCH /admin/users/:id — ban/unban or grant/revoke admin
@@ -772,6 +793,8 @@ const ADMIN_SETTING_VALIDATORS = {
   vip_price_year:            'price',
   gost_token_price:          'price',
   referral_min_amount:       'price',
+  // 0 = автопрогрев выключен, иначе интервал в часах (см. jobs/scheduleWarmup.js)
+  warmup_auto_hours:         'non_negative',
 };
 
 function validateAdminSettingValue(key, value) {
@@ -784,6 +807,7 @@ function validateAdminSettingValue(key, value) {
   if (kind === 'percent' && (num < 0 || num > 100)) return 'Значение должно быть от 0 до 100';
   if (kind === 'positive_int' && (!Number.isInteger(num) || num <= 0)) return 'Значение должно быть положительным целым числом';
   if (kind === 'price' && num < 0) return 'Значение должно быть неотрицательным числом';
+  if (kind === 'non_negative' && num < 0) return 'Значение должно быть неотрицательным числом';
   return null;
 }
 
@@ -818,28 +842,38 @@ router.get('/settings', async (req, res) => {
 // ─── Finance ─────────────────────────────────────────────────
 
 // GET /admin/finance/summary
+// Both row scans (transactions, profile balances) page through fetchAll: a
+// plain select silently stops at PostgREST's 1000-row cap, which quietly
+// understated every figure on this page once the ledger passed that size.
 router.get('/finance/summary', async (req, res) => {
-  const [txRes, balRes, expRes] = await Promise.all([
-    supabase.from('transactions')
+  const [txRes, balRes, expRes, vipUsersRes] = await Promise.all([
+    fetchAll(() => supabase.from('transactions')
       .select('type, amount, platform_profit')
-      .in('type', ['withdrawal', 'deposit_referral', 'referral_bonus', 'balance_to_token'])
-      .eq('status', 'completed'),
-    supabase.from('profiles').select('balance'),
+      .in('type', ['withdrawal', 'deposit_referral', 'referral_bonus', 'balance_to_token', 'vip_purchase'])
+      .eq('status', 'completed')),
+    fetchAll(() => supabase.from('profiles').select('balance')),
     supabase.from('admin_settings').select('value').eq('key', 'platform_expenses').single(),
+    supabase.from('profiles').select('id', { count: 'exact', head: true }).gt('vip_expires_at', new Date().toISOString()),
   ]);
 
   if (txRes.error) return serverError(res, txRes.error);
 
   const txs = txRes.data ?? [];
   const round2 = n => Math.round(n * 100) / 100;
+  const sumBy = (type, col) => round2(txs.filter(t => t.type === type).reduce((s, t) => s + (parseFloat(t[col]) || 0), 0));
 
   // Commission moved from deposit to withdrawal (see admin_settings.withdrawal_commission_pct)
-  const commission_regular    = round2(txs.filter(t => t.type === 'withdrawal').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
-  const commission_referral   = round2(txs.filter(t => t.type === 'deposit_referral').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
-  const referral_bonuses_paid = round2(txs.filter(t => t.type === 'referral_bonus').reduce((s, t) => s + parseFloat(t.amount ?? 0), 0));
-  const gost_tokens_revenue   = round2(txs.filter(t => t.type === 'balance_to_token').reduce((s, t) => s + parseFloat(t.platform_profit ?? 0), 0));
-  const total_platform_profit = round2(commission_regular + commission_referral - referral_bonuses_paid + gost_tokens_revenue);
-  const total_user_balances   = round2((balRes.data ?? []).reduce((s, p) => s + parseFloat(p.balance ?? 0), 0));
+  const commission_regular    = sumBy('withdrawal', 'platform_profit');
+  const commission_referral   = sumBy('deposit_referral', 'platform_profit');
+  const referral_bonuses_paid = sumBy('referral_bonus', 'amount');
+  const gost_tokens_revenue   = sumBy('balance_to_token', 'platform_profit');
+  // VIP is bought out of wallet balance and never returns to the user, so the
+  // whole charge is platform profit (purchase_vip writes platform_profit =
+  // p_price). It was missing from this summary entirely.
+  const vip_revenue           = sumBy('vip_purchase', 'platform_profit');
+  const vip_purchases_count   = txs.filter(t => t.type === 'vip_purchase').length;
+  const total_platform_profit = round2(commission_regular + commission_referral - referral_bonuses_paid + gost_tokens_revenue + vip_revenue);
+  const total_user_balances   = round2((balRes.data ?? []).reduce((s, p) => s + (parseFloat(p.balance) || 0), 0));
   const platform_expenses     = parseFloat(expRes.data?.value ?? '0');
   const available_to_withdraw = round2(total_platform_profit - platform_expenses);
 
@@ -848,6 +882,9 @@ router.get('/finance/summary', async (req, res) => {
     commission_referral,
     referral_bonuses_paid,
     gost_tokens_revenue,
+    vip_revenue,
+    vip_purchases_count,
+    vip_active_count: vipUsersRes.count ?? 0,
     total_platform_profit,
     total_user_balances,
     platform_expenses,
@@ -996,14 +1033,22 @@ router.get('/schedule-warmup/status', async (req, res) => {
   res.json(state);
 });
 
-// POST /admin/schedule-warmup/start
+// POST /admin/schedule-warmup/start  { force?: boolean }
+// force=true ignores schedule_cache and re-fetches everything; default resumes
+// (skips keys that are still warm).
 router.post('/schedule-warmup/start', async (req, res) => {
   const state = await scheduleWarmup.getState();
   if (state?.status === 'running' || state?.status === 'waiting_captcha') {
     return res.status(400).json({ error: 'Уже выполняется' });
   }
-  scheduleWarmup.startWarmup(); // не ждём завершения
+  scheduleWarmup.startWarmup({ force: req.body?.force === true }); // не ждём завершения
   res.json({ started: true });
+});
+
+// POST /admin/schedule-warmup/reset — unwedge a stuck 'running'/'waiting_captcha'
+router.post('/schedule-warmup/reset', async (req, res) => {
+  await scheduleWarmup.resetWarmup();
+  res.json({ reset: true });
 });
 
 // POST /admin/schedule-warmup/solve-captcha  { answer }
