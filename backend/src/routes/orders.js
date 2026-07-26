@@ -10,7 +10,7 @@ const { runAIChatCheck }      = require('../utils/aiChatCheck');
 const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
 const { sanitizeSearchTerm } = require('../utils/search');
-const { addReputation, grantAchievement } = require('../utils/reputation');
+const { addReputation, grantAchievement, reviewReputation } = require('../utils/reputation');
 const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
@@ -607,8 +607,16 @@ router.post('/:id/reviews', auth, isBanned, async (req, res) => {
 
   // Reputation for the rating + achievement checks (DB trigger already
   // recalculated profiles.average_rating/reviews_count on insert above).
-  if (r === 5) await addReputation(supabase, reviewee_id, 30);
-  else if (r === 4) await addReputation(supabase, reviewee_id, 15);
+  //
+  // Только исполнителю (context === 'as_executor'). Отзывы остаются взаимными,
+  // но репутация — биржевая характеристика исполнителя: +50 за выполненный
+  // заказ получает он же, поэтому минус за плохую оценку ему есть чем закрыть.
+  // У заказчика такого источника нет, и списание загоняло бы его в ноль без
+  // возможности выбраться. Таблица очков — REVIEW_REPUTATION в utils/reputation.js
+  // (1★ и 2★ отнимают, 3★ не двигает, ниже нуля репутация не уходит).
+  if (context === 'as_executor') {
+    await addReputation(supabase, reviewee_id, reviewReputation(r));
+  }
 
   const { data: revProf } = await supabase.from('profiles')
     .select('average_rating, reviews_count').eq('id', reviewee_id).single();

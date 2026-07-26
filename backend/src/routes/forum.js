@@ -4,7 +4,7 @@ const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { moderateSync } = require('../utils/forumModerator');
 const { serverError }  = require('../utils/httpError');
-const { addReputation, grantAchievement } = require('../utils/reputation');
+const { grantAchievement } = require('../utils/reputation');
 const { withIsVip } = require('../utils/vip');
 
 const router   = Router();
@@ -184,7 +184,6 @@ router.post('/threads', auth, isBanned, async (req, res) => {
   });
   if (pe) return serverError(res, pe, 'forum:create-first-post');
 
-  await addReputation(supabase, req.userId, 5);
   await bumpForumPostsCount(req.userId);
 
   res.status(201).json({ thread_id: thread.id });
@@ -201,19 +200,15 @@ router.post('/threads/:id/view', async (req, res) => {
   });
   res.status(204).end();
 
-  // Author rep bonuses / achievements at view milestones (fire-and-forget, after response)
+  // Достижения за просмотры (fire-and-forget, после ответа). Репутацию форум
+  // больше не даёт вовсе — она осталась только биржевой (заказы и отзывы),
+  // иначе уровень и скидка VIP набивались бы постами. Колонки
+  // rep_bonus_50_given / rep_bonus_200_given в forum_threads стали неиспользуемыми,
+  // но не удалены: пустая колонка ничего не стоит, а миграция на живой базе — да.
   const { data: thread } = await supabase.from('forum_threads')
-    .select('author_id, views_count, rep_bonus_50_given, rep_bonus_200_given')
+    .select('author_id, views_count')
     .eq('id', req.params.id).single();
   if (thread) {
-    if (thread.views_count >= 50 && !thread.rep_bonus_50_given) {
-      await addReputation(supabase, thread.author_id, 10);
-      await supabase.from('forum_threads').update({ rep_bonus_50_given: true }).eq('id', req.params.id);
-    }
-    if (thread.views_count >= 200 && !thread.rep_bonus_200_given) {
-      await addReputation(supabase, thread.author_id, 25);
-      await supabase.from('forum_threads').update({ rep_bonus_200_given: true }).eq('id', req.params.id);
-    }
     if (thread.views_count >= 500)  await grantAchievement(supabase, thread.author_id, 'popular_thread');
     if (thread.views_count >= 2000) await grantAchievement(supabase, thread.author_id, 'viral_thread');
   }
@@ -281,7 +276,6 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
 
   if (error) return serverError(res, error, 'forum:reply');
 
-  await addReputation(supabase, req.userId, 2);
   await bumpForumPostsCount(req.userId);
 
   res.status(201).json({ ...post, author: withIsVip(post.author) });

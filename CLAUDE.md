@@ -68,6 +68,11 @@ Backend ships as a Docker image (`backend/Dockerfile`) to Render; env vars are s
 
 **Aggregates must page.** PostgREST caps a response at `db-max-rows` (1000) *silently* — no error, just fewer rows. `backend/src/utils/pagedFetch.js` (`fetchAll`/`sumAll`) walks the pages; use it for any "sum/count everything" query. `/admin/stats` and `/admin/finance/summary` were both understating figures for exactly this reason (plus explicit `.limit(2000)` caps in `/stats`).
 
+**Reputation is marketplace-only, and it can go down.** `utils/reputation.js` owns the whole rule: `REVIEW_REPUTATION` (5★ +30, 4★ +15, 3★ 0, 2★ −15, 1★ −30) plus +50 to the executor on order completion (`routes/orders.js`). Three constraints that are easy to break by accident:
+- **Only the executor's reputation moves on a review** (`context === 'as_executor'` in `POST /orders/:id/reviews`). Reviews stay mutual — the executor still reviews the customer — but the customer's reputation is untouched, because the +50 completion bonus is the executor's only, so only the executor can offset a bad review.
+- **`addReputation` clamps at zero** and logs the *applied* delta to `reputation_log`, not the requested one. Don't "simplify" the clamp away: a first order rated 1★ would otherwise push a new user negative with no way back.
+- **The forum grants no reputation at all** (removed 2026-07-26 — it used to give +5/+2 for threads/replies and +10/+25 at view milestones, which let anyone farm levels and the VIP discount without working). Forum achievements stayed. `forum_threads.rep_bonus_50_given` / `rep_bonus_200_given` are now unused columns, deliberately left in place rather than migrated away.
+
 **Money paths are not atomic where you'd expect.** `addReputation` in `backend/src/utils/reputation.js` is read-then-update, not a DB transaction — acceptable for reputation points but flagged there with a `ponytail:` comment as unsafe for anything money-related. Actual escrow/wallet balance changes go through Supabase RPCs/triggers instead — check `@docs/schema.md` for the existing atomic RPC before adding new balance-mutating code in Express.
 
 **Admin panel** (in the `ebu.gubkin` UI) requires `profiles.is_admin = true`; first admin must be granted manually via SQL (`UPDATE profiles SET is_admin = true WHERE id = '<uuid>'`).

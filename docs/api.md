@@ -7,6 +7,8 @@ No `/api` prefix — all routers are mounted directly on root in `backend/src/ap
 ## `/orders` (`routes/orders.js`)
 `GET /` (list, optionalAuth) · `GET /mine` · `GET /applied` · `POST /` (create) · `GET /pending-reviews` · `GET /:id` · `POST /:id/apply` · `GET /:id/applications` · `POST /:id/applications/:appId/select` · `POST /:id/topup` · `POST /:id/cancel` · `POST /:id/confirm` · `POST /:id/dispute` · `GET /:id/reviews` · `POST /:id/reviews` · `GET /:id/conversation` · `POST /:id/attachments` (multipart) · `GET /:id/attachments/:attachmentId/download`
 
+Reputation on `POST /orders/:id/reviews`: applied **only when the reviewee was the executor** (`context === 'as_executor'`), by the `REVIEW_REPUTATION` table in `utils/reputation.js` — 5★ +30, 4★ +15, 3★ 0, 2★ −15, 1★ −30. `addReputation` clamps the result at zero and logs the applied delta. `/forum/*` grants no reputation at all (achievements only).
+
 ## `/listings` (`routes/listings.js`)
 `GET /categories` · `POST /` · `GET /` (optionalAuth) · `GET /mine` · `GET /:id` · `PATCH /:id` · `PATCH /:id/toggle` · `POST /:id/order` (convert listing to order)
 
