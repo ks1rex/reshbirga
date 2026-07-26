@@ -33,6 +33,17 @@ No `/api` prefix — all routers are mounted directly on root in `backend/src/ap
 ## `/gost` (`routes/gost.js`) — GOST calculator token system
 `GET /token-balance` · `POST /buy-tokens` · `POST /activate-key`
 
+## `/mfa` (`routes/mfa.js`) — admin 2FA backup codes
+GoTrue has no backup-code concept, so a code cannot mint an aal2 session — it **removes** the factor instead, after which password-only access works again and the admin re-enrolls. Codes are 16 chars (~79 bits) from a confusable-free alphabet, stored as sha256 hashes in `admin_mfa_backup_codes` (service_role-only RLS, migration `20260726120000`).
+
+| Route | Gate | Notes |
+|---|---|---|
+| `GET /backup-codes` | `auth` + `adminMiddleware` (so aal2) | `{ total, unused, generated_at }` — never returns codes |
+| `POST /backup-codes` | `auth` + `adminMiddleware` (so aal2) | Regenerates the whole set of 10, invalidating the old one. The only response that contains plaintext codes |
+| `POST /recover` | `auth` only — **deliberately not** `adminMiddleware` | `{ code }`. Checks `is_admin` inline, marks the code used, deletes every verified factor via `auth.admin.mfa.deleteFactor`, then wipes remaining codes. Telegram notification on both success and failure |
+
+`POST /recover` cannot sit behind `adminMiddleware`: that middleware demands aal2 from exactly the admins who need recovery. The code is marked used *before* the factor is deleted — a failure there burns one code (annoying) rather than leaving a live code against an already-removed factor.
+
 ## `/settings` (`routes/settings.js`)
 `GET /:key`
 
@@ -52,6 +63,7 @@ Chat moderation: `GET /chat-moderation` · `PATCH /chat-moderation/:msgId/review
 Site settings: `PUT /settings/:key` · `PUT /admin-settings/:key` · `GET /settings`
 Forum moderation: `GET /forum/flagged` · `POST /forum/posts/:id/approve` · `DELETE /forum/posts/:id` · `GET /forum/reports` · `POST /forum/reports/:id/resolve` · `GET /forum/categories` · `POST /forum/categories` · `PATCH /forum/categories/:id` · `DELETE /forum/categories/:id`
 Stats: `GET /stats`
+VIP: `GET /vip` — plans + per-level discount table (computed with the same `utils/vip.js` helpers the purchase uses), revenue, purchase count, active/expiring counts, and the list of active subscribers
 Schedule warmup: `GET /schedule-warmup/status` · `POST /schedule-warmup/start` (`{ force? }`) · `POST /schedule-warmup/solve-captcha` · `POST /schedule-warmup/cancel` · `POST /schedule-warmup/reset`
 
 ### Paginated admin responses
@@ -59,7 +71,7 @@ Schedule warmup: `GET /schedule-warmup/status` · `POST /schedule-warmup/start` 
 
 | Endpoint | Query | Response |
 |---|---|---|
-| `GET /ledger` | `type`, `nickname`, `date_from`, `date_to`, `page` (1), `limit` (100, max 5000) | `{ entries, total, page, limit }` |
+| `GET /ledger` | `type`, `nickname`, `date_from`, `date_to`, `page` (1), `limit` (100, max 5000 — but PostgREST still stops at 1000, so exports page instead) | `{ entries, total, page, limit }` |
 | `GET /users` | `search` (nickname **or** email), `filter=banned\|admins\|vip`, `page` (1), `limit` (50, max 500) | `{ users, total, page, limit }` |
 
 Every filter on both runs in SQL, so `total` counts the filtered set. `/ledger`'s `nickname` used to be applied in Node *after* a hard 500-row fetch, which hid older matches; `/users` used to return every profile row plus a 1000-user page of the GoTrue admin API. Email now comes from `profiles.email` (the column `GET /profile` already reads), so no auth-admin call is involved.

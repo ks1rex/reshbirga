@@ -6,7 +6,7 @@ const { serverError } = require('../utils/httpError');
 const { sanitizeSearchTerm } = require('../utils/search');
 const { sendTelegram } = require('../utils/telegramNotify');
 const { grantAchievement } = require('../utils/reputation');
-const { withIsVip } = require('../utils/vip');
+const { withIsVip, vipDiscountPct, applyVipDiscount } = require('../utils/vip');
 const { fetchAll, sumAll } = require('../utils/pagedFetch');
 const scheduleWarmup = require('../jobs/scheduleWarmup');
 
@@ -901,6 +901,72 @@ router.patch('/finance/expenses', async (req, res) => {
     .upsert({ key: 'platform_expenses', value: String(amount), updated_by: req.userId, updated_at: new Date().toISOString() }, { onConflict: 'key' });
   if (error) return serverError(res, error);
   res.json({ success: true, platform_expenses: amount });
+});
+
+// ─── VIP / подписки ──────────────────────────────────────────
+
+// GET /admin/vip — всё про подписки одним ответом: тарифы, скидка по уровню,
+// деньги и список действующих подписок.
+//
+// Скидка по уровню считается тем же vipDiscountPct, что применяется при покупке
+// (routes/wallet.js), а не переписанной формулой — иначе таблица в админке
+// разъехалась бы с реальной ценой при первой же правке правила.
+router.get('/vip', async (req, res) => {
+  const nowIso = new Date().toISOString();
+  const soonIso = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+
+  const [settingsRes, txRes, subsRes, expiringRes] = await Promise.all([
+    supabase.from('admin_settings').select('key, value')
+      .in('key', ['vip_price_month', 'vip_price_year', 'vip_duration_month_days',
+                  'vip_duration_year_days', 'vip_token_discount_pct']),
+    fetchAll(() => supabase.from('transactions')
+      .select('amount, platform_profit, created_at')
+      .eq('type', 'vip_purchase').eq('status', 'completed')),
+    fetchAll(() => supabase.from('profiles')
+      .select('id, nickname, avatar_url, level, vip_expires_at')
+      .gt('vip_expires_at', nowIso)
+      .order('vip_expires_at', { ascending: true })),
+    supabase.from('profiles').select('id', { count: 'exact', head: true })
+      .gt('vip_expires_at', nowIso).lt('vip_expires_at', soonIso),
+  ]);
+
+  if (txRes.error)   return serverError(res, txRes.error,   'admin:vip:transactions');
+  if (subsRes.error) return serverError(res, subsRes.error, 'admin:vip:subscribers');
+
+  const settings = Object.fromEntries((settingsRes.data ?? []).map(r => [r.key, r.value]));
+  const num = (key, fallback) => {
+    const n = parseFloat(settings[key]);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
+  const monthBase = num('vip_price_month', 300);
+  const yearBase  = num('vip_price_year', 1500);
+
+  const txs = txRes.data ?? [];
+  const round2 = n => Math.round(n * 100) / 100;
+
+  res.json({
+    plans: {
+      month: { base_price: monthBase, days: num('vip_duration_month_days', 30) },
+      year:  { base_price: yearBase,  days: num('vip_duration_year_days', 365) },
+    },
+    gost_token_discount_pct: num('vip_token_discount_pct', 0),
+    // 1..10 — те же уровни, что выдаёт utils/reputation.js
+    level_discounts: Array.from({ length: 10 }, (_, i) => {
+      const level = i + 1;
+      return {
+        level,
+        discount_pct: vipDiscountPct(level),
+        month_price: applyVipDiscount(monthBase, level),
+        year_price:  applyVipDiscount(yearBase, level),
+      };
+    }),
+    revenue:         round2(txs.reduce((s, t) => s + (parseFloat(t.platform_profit) || 0), 0)),
+    purchases_count: txs.length,
+    active_count:    (subsRes.data ?? []).length,
+    expiring_week_count: expiringRes.count ?? 0,
+    subscribers:     subsRes.data ?? [],
+  });
 });
 
 // ─── Forum moderation (admin) ─────────────────────────────────

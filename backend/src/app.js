@@ -17,6 +17,7 @@ const forumRouter          = require('./routes/forum');
 const gostRouter           = require('./routes/gost');
 const statsRouter          = require('./routes/stats');
 const scheduleRouter       = require('./routes/schedule');
+const mfaRouter            = require('./routes/mfa');
 const { startForumAIJob }  = require('./utils/forumModerator');
 const { startVipExpiryJob } = require('./utils/vipExpiry');
 const { startWarmupScheduleJob } = require('./jobs/scheduleWarmup');
@@ -70,6 +71,7 @@ app.use('/forum',          forumRouter);
 app.use('/gost',           gostRouter);
 app.use('/stats',          statsRouter);
 app.use('/schedule',       scheduleRouter);
+app.use('/mfa',            mfaRouter);
 
 // Start background AI forum moderation (fire-and-forget, every 10 min)
 startForumAIJob();

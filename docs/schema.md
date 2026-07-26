@@ -40,6 +40,7 @@ Exact columns/constraints live in the migration files; this is a table-of-conten
 | `listings` | 0020 | marketplace listings (the "market_services" concept from spec) |
 | `achievements` | 0025 | gamification |
 | `market_categories` | 0025 | category taxonomy for orders/listings |
+| `admin_mfa_backup_codes` | `20260726120000` | admin 2FA backup codes — sha256 hashes only, `service_role`-only RLS, written exclusively by `routes/mfa.js` |
 
 ## Key functions/triggers
 - `is_admin()` (0002), `update_updated_at()` (0003), `is_conversation_participant()` (0006)
@@ -66,5 +67,7 @@ Accepted keys are whitelisted (with a per-key validator) in `ADMIN_SETTING_VALID
 
 ## RLS boundary
 Every listed table has RLS enabled, but the backend's Supabase client (`backend/src/supabase_client.js`) is service-role and bypasses RLS. **Express routes are the real authorization boundary**, not the database.
+
+**`admin_mfa_backup_codes`** (`20260726120000_admin_mfa_backup_codes.sql`, applied 2026-07-26) is `service_role`-only from birth: RLS on, one `for all to service_role` policy, no public `SELECT`. It stores sha256 hashes of one-time codes that *remove* an admin's TOTP factor (GoTrue can't mint aal2 from a backup code) — the frontend never reads the table, only counters and the one-time plaintext response from `POST /mfa/backup-codes`.
 
 **`schedule_warmup_state`** (added by `0036_schedule_warmup_state.sql`'s real live counterpart, not the local file — see above) had **no RLS at all** until `20260716120000_schedule_warmup_state_rls.sql` (2026-07-16) — it held a third-party `session_cookie` and captcha image readable/writable via the public anon key. Now `service_role`-only, no public `SELECT`. See CLAUDE.md's "Security fixes 2026-07-16".
