@@ -107,13 +107,30 @@ async function getBalance(userId) {
 // profiles/orders (orders.customer_id, disputes.order_id/opened_by,
 // reviews.order_id/reviewer_id/reviewee_id, deposit/withdrawal_requests,
 // support_tickets, forum_threads/forum_posts) — их надо удалить первыми,
-// иначе deleteUser упадёт с ошибкой FK.
+// иначе deleteUser упадёт с ошибкой FK. conversations.order_id/support_ticket_id
+// — SET NULL, а не CASCADE, поэтому чаты не исчезают вместе с заказом/тикетом
+// и их нужно найти (по заказу, тикету и по участнику — до удаления профиля,
+// иначе conversation_participants уже каскадно снесётся) и удалить явно;
+// это каскадом уносит messages/message_attachments/chat_moderation_log.
 async function cleanupTestData(ids) {
   if (!ids.length) return;
   try {
     const { data: asCust } = await adminSupabase.from('orders').select('id').in('customer_id', ids);
     const { data: asExec } = await adminSupabase.from('orders').select('id').in('executor_id', ids);
     const orderIds = [...new Set([...(asCust ?? []), ...(asExec ?? [])].map(o => o.id))];
+
+    const { data: tickets } = await adminSupabase.from('support_tickets').select('id').in('user_id', ids);
+    const ticketIds = (tickets ?? []).map(t => t.id);
+
+    const { data: participantRows } = await adminSupabase.from('conversation_participants').select('conversation_id').in('user_id', ids);
+    const { data: convByOrder }   = orderIds.length  ? await adminSupabase.from('conversations').select('id').in('order_id', orderIds)          : { data: [] };
+    const { data: convByTicket }  = ticketIds.length ? await adminSupabase.from('conversations').select('id').in('support_ticket_id', ticketIds) : { data: [] };
+    const conversationIds = [...new Set([
+      ...(participantRows ?? []).map(p => p.conversation_id),
+      ...(convByOrder ?? []).map(c => c.id),
+      ...(convByTicket ?? []).map(c => c.id),
+    ])];
+    if (conversationIds.length) await adminSupabase.from('conversations').delete().in('id', conversationIds);
 
     if (orderIds.length) {
       await adminSupabase.from('disputes').delete().in('order_id', orderIds);
@@ -125,7 +142,7 @@ async function cleanupTestData(ids) {
     await adminSupabase.from('transactions').delete().in('user_id', ids);
     await adminSupabase.from('deposit_requests').delete().in('user_id', ids);
     await adminSupabase.from('withdrawal_requests').delete().in('user_id', ids);
-    await adminSupabase.from('support_tickets').delete().in('user_id', ids);
+    if (ticketIds.length) await adminSupabase.from('support_tickets').delete().in('id', ticketIds);
     await adminSupabase.from('forum_threads').delete().in('author_id', ids);
     await adminSupabase.from('forum_posts').delete().in('author_id', ids);
     if (orderIds.length) await adminSupabase.from('orders').delete().in('id', orderIds);
