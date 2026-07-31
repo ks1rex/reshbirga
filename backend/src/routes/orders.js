@@ -14,6 +14,7 @@ const { addReputation, grantAchievement, reviewReputation } = require('../utils/
 const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
+const { marketplaceCommissionPct, chargeWithCommission, round2 } = require('../utils/commission');
 
 const router = Router();
 const upload = makeUploader();
@@ -129,8 +130,11 @@ router.post('/', auth, isBanned, async (req, res) => {
     return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.`, code: 'LISTING_LIMIT_REACHED' });
   }
 
-  // No platform commission on orders — 1:1 balance transfer
-  const reserved = Math.round(amount * 100) / 100;
+  // Комиссия биржи: цена в объявлении — это то, что получит исполнитель,
+  // с заказчика списывается цена + 10% (admin_settings.marketplace_commission_pct).
+  const pct        = await marketplaceCommissionPct();
+  const reserved   = chargeWithCommission(amount, pct);
+  const commission = round2(reserved - round2(amount));
 
   // Check balance and deduct atomically
   const { data: profile } = await supabase.from('profiles').select('balance').eq('id', req.userId).single();
@@ -148,7 +152,7 @@ router.post('/', auth, isBanned, async (req, res) => {
     .from('orders')
     .insert({
       customer_id: req.userId, title, description, subject, order_type: 'order',
-      base_amount: amount, commission_amount: 0, reserved_amount: reserved,
+      base_amount: amount, commission_amount: commission, reserved_amount: reserved,
       final_amount: null, deposit_amount: 0,
       requires_contact_exchange: !!requires_contact_exchange,
       contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
@@ -323,17 +327,22 @@ router.post('/:id/applications/:appId/select', auth, isBanned, async (req, res) 
 
   if (!app.proposed_amount) return res.status(400).json({ error: 'Application has no proposed_amount' });
 
-  // No commission — 1:1 transfers
+  // Исполнитель называет свою цену — её он и получит; заказчик резервирует
+  // цену + комиссию биржи. Сравнивать с уже зарезервированным надо именно
+  // сумму с наценкой, иначе доплата/возврат посчитаются мимо комиссии.
   const final_amount = Math.round(parseFloat(app.proposed_amount) * 100) / 100;
   const reserved     = Math.round(parseFloat(order.reserved_amount) * 100) / 100;
+  const pct          = await marketplaceCommissionPct();
+  const charge       = chargeWithCommission(final_amount, pct);
+  const commission   = round2(charge - final_amount);
   let newStatus;
 
-  if (final_amount <= reserved) {
-    const diff = Math.round((reserved - final_amount) * 100) / 100;
+  if (charge <= reserved) {
+    const diff = round2(reserved - charge);
     newStatus = 'in_progress';
 
     const { data: claimed, error: orderErr } = await supabase.from('orders')
-      .update({ executor_id: app.executor_id, final_amount, commission_amount: 0, reserved_amount: final_amount, status: 'in_progress' })
+      .update({ executor_id: app.executor_id, final_amount, commission_amount: commission, reserved_amount: charge, status: 'in_progress' })
       .eq('id', orderId).eq('status', 'open').select('id');
     if (orderErr) return serverError(res, orderErr, 'select:update');
     if (!claimed?.length) return res.status(409).json({ error: 'Заказ уже не открыт' });
@@ -346,11 +355,11 @@ router.post('/:id/applications/:appId/select', auth, isBanned, async (req, res) 
       });
     }
   } else {
-    const topup = Math.round((final_amount - reserved) * 100) / 100;
+    const topup = round2(charge - reserved);
     newStatus = 'awaiting_topup';
 
     const { data: claimed, error: orderErr } = await supabase.from('orders')
-      .update({ executor_id: app.executor_id, final_amount, commission_amount: 0, required_topup: topup, status: 'awaiting_topup' })
+      .update({ executor_id: app.executor_id, final_amount, commission_amount: commission, required_topup: topup, status: 'awaiting_topup' })
       .eq('id', orderId).eq('status', 'open').select('id');
     if (orderErr) return serverError(res, orderErr, 'select:topup:update');
     if (!claimed?.length) return res.status(409).json({ error: 'Заказ уже не открыт' });
@@ -481,11 +490,14 @@ router.post('/:id/confirm', auth, async (req, res) => {
     if (orderErr) return serverError(res, orderErr, 'confirm:complete');
     if (!completed?.length) return res.json({ status: 'completed' }); // already done
 
-    // Payout executor immediately via balance
-    await supabase.rpc('add_wallet_balance', { p_user_id: order.executor_id, p_amount: payoutAmount });
+    // Payout executor immediately via balance — заработанное, выводится без
+    // комиссии. Комиссия биржи (разница между списанным с заказчика и этой
+    // выплатой) признаётся доходом платформы здесь же, в момент завершения.
+    await supabase.rpc('add_earned_balance', { p_user_id: order.executor_id, p_amount: payoutAmount });
     await supabase.from('transactions').insert({
       user_id: order.executor_id, order_id: order.id,
       type: 'order_payout', amount: payoutAmount, status: 'completed',
+      platform_profit: round2(parseFloat(order.commission_amount ?? 0)),
     });
 
     // Deal/reputation/achievement bookkeeping for the executor

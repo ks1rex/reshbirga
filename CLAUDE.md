@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-СтудБиржа — student services marketplace. Customers post orders/catalog listings, executors apply, payment is held in escrow, released on confirmation, disputes are arbitrated by admins. Platform takes a 10% commission, held on **withdrawal** (not on deposit — deposits are credited 1:1; rate in `admin_settings.withdrawal_commission_pct`).
+СтудБиржа — student services marketplace. Customers post orders/catalog listings, executors apply, payment is held in escrow, released on confirmation, disputes are arbitrated by admins.
+
+**Money model (rewritten 2026-07-31, see `docs/schema.md` "Two balances"):** a wallet has two halves — `deposited_balance` (top-ups) and `earned_balance` (marketplace payouts + referral bonuses); `profiles.balance` is their sum, kept by a CHECK. Spending debits deposited first, then earned. The platform earns twice: **+10% on top of the displayed price, paid by the buyer** on every order/listing (`admin_settings.marketplace_commission_pct`; the seller receives the displayed price in full, the markup is recognised at completion), and **10% on withdrawal from `deposited_balance` only** (`admin_settings.withdrawal_commission_pct`; withdrawing earned money is free). Deposits are still credited 1:1.
 
 Repo is in Russian (UI text, commit-adjacent docs, error messages). Match that when writing user-facing strings.
 

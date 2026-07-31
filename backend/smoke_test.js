@@ -86,8 +86,15 @@ async function createTestUser(prefix) {
   return { email, pass, userId: data.user.id, nick };
 }
 
-async function setBalance(userId, amount) {
-  await adminSupabase.from('profiles').update({ balance: amount }).eq('id', userId);
+// balance = deposited_balance + earned_balance держится CHECK-ом
+// (20260731120000_split_balances_and_marketplace_commission.sql), поэтому
+// тестовый баланс раскладываем явно. По умолчанию — «занесённый».
+async function setBalance(userId, amount, bucket = 'deposited') {
+  await adminSupabase.from('profiles').update({
+    balance: amount,
+    deposited_balance: bucket === 'deposited' ? amount : 0,
+    earned_balance:    bucket === 'earned'    ? amount : 0,
+  }).eq('id', userId);
 }
 
 async function getBalance(userId) {
@@ -219,8 +226,8 @@ async function run() {
   await setBalance(cust2Id, 5000);
   await setBalance(exec2Id, 500);
 
-  // ── Step 5: Create order — balance deducted immediately (no commission) ──────
-  console.log('\nStep 5 — Create order (instant balance deduction, no commission)');
+  // ── Step 5: Create order — balance deducted immediately (price + 10%) ───────
+  console.log('\nStep 5 — Create order (instant balance deduction, price + 10% commission)');
   try {
     const balBefore = await getBalance(custId);
     const r = await api('POST', '/orders', custToken, {
@@ -231,10 +238,11 @@ async function run() {
       orderId = r.body.id;
       const balAfter = await getBalance(custId);
       const deducted = Math.round((balBefore - balAfter) * 100) / 100;
-      if (r.body.status === 'open' && Math.abs(deducted - 500) < 0.01)
-        ok(5, `Order created id=${orderId.slice(0,8)}, status=open, deducted=${deducted} ₽ (= base_amount)`);
+      // с заказчика списывается цена + 10% комиссии биржи (исполнителю уйдёт 500)
+      if (r.body.status === 'open' && Math.abs(deducted - 550) < 0.01)
+        ok(5, `Order created id=${orderId.slice(0,8)}, status=open, deducted=${deducted} ₽ (= base_amount + 10%)`);
       else
-        fail(5, 'Order status or deduction wrong', `status=${r.body.status} deducted=${deducted} expected=500`);
+        fail(5, 'Order status or deduction wrong', `status=${r.body.status} deducted=${deducted} expected=550`);
     } else {
       fail(5, 'POST /orders', `status=${r.status} ${JSON.stringify(r.body)}`);
     }
@@ -286,9 +294,9 @@ async function run() {
     if (r2.status === 200 && r2.body.status === 'completed') {
       const execBalAfter = await getBalance(execId);
       const gained = Math.round((execBalAfter - execBalBefore) * 100) / 100;
-      // Executor applied with proposed_amount=500 (same as base), no commission
+      // Исполнитель получает названную цену целиком — комиссию платил заказчик
       if (Math.abs(gained - 500) < 0.01)
-        ok(8, `Order completed, executor balance +${gained} ₽`);
+        ok(8, `Order completed, executor balance +${gained} ₽ (полная цена, комиссия с заказчика)`);
       else
         fail(8, 'Executor payout amount wrong', `gained=${gained} expected=500`);
     } else {
@@ -312,10 +320,11 @@ async function run() {
     if (rc.status === 200 && rc.body.status === 'cancelled') {
       const balAfterCancel = await getBalance(custId);
       const refunded = Math.round((balAfterCancel - balAfterCreate) * 100) / 100;
-      if (Math.abs(refunded - 400) < 0.01)
+      // возвращается всё зарезервированное, включая комиссию: 400 + 10%
+      if (Math.abs(refunded - 440) < 0.01)
         ok(9, `Order cancelled, full refund=${refunded} ₽ (= reserved_amount)`);
       else
-        fail(9, 'Refund amount wrong', `refunded=${refunded} expected=400`);
+        fail(9, 'Refund amount wrong', `refunded=${refunded} expected=440`);
     } else {
       fail(9, 'Cancel order', `status=${rc.status} ${JSON.stringify(rc.body)}`);
     }
@@ -342,11 +351,11 @@ async function run() {
         if (rs.status === 200 && rs.body.status === 'in_progress') {
           const balAfterSelect = await getBalance(custId);
           const refundBack = Math.round((balAfterSelect - balAfterCreate) * 100) / 100;
-          // reserved=1000, final=600 → excess=400
-          if (Math.abs(refundBack - 400) < 0.01)
-            ok(10, `refund_excess=${refundBack} ₽ credited (1000 - 600)`);
+          // зарезервировано 1100 (1000+10%), итоговое списание 660 (600+10%) → возврат 440
+          if (Math.abs(refundBack - 440) < 0.01)
+            ok(10, `refund_excess=${refundBack} ₽ credited (1100 - 660)`);
           else
-            fail(10, 'refund_excess amount', `got=${refundBack} expected=400`);
+            fail(10, 'refund_excess amount', `got=${refundBack} expected=440`);
         } else {
           fail(10, 'Select app', `status=${rs.status} ${JSON.stringify(rs.body)}`);
         }
@@ -379,11 +388,11 @@ async function run() {
           if (rt.status === 200 && rt.body.status === 'in_progress') {
             const balAfterTopup = await getBalance(cust2Id);
             const paid = Math.round((balBeforeTopup - balAfterTopup) * 100) / 100;
-            // reserved=500, final=800 → topup=300
-            if (Math.abs(paid - 300) < 0.01)
-              ok(11, `Topup paid=${paid} ₽ (800 - 500), order → in_progress`);
+            // зарезервировано 550 (500+10%), нужно 880 (800+10%) → доплата 330
+            if (Math.abs(paid - 330) < 0.01)
+              ok(11, `Topup paid=${paid} ₽ (880 - 550), order → in_progress`);
             else
-              fail(11, 'Topup amount', `paid=${paid} expected=300`);
+              fail(11, 'Topup amount', `paid=${paid} expected=330`);
           } else {
             fail(11, 'POST /topup', `status=${rt.status} ${JSON.stringify(rt.body)}`);
           }
@@ -408,15 +417,35 @@ async function run() {
   // ── Step 13: Withdrawal cycle ─────────────────────────────────────────────
   console.log('\nStep 13 — Withdrawal cycle');
   try {
-    await setBalance(execId, 1000);
+    await setBalance(execId, 5000);
     const balBefore = await getBalance(execId);
 
-    const r = await api('POST', '/wallet/withdrawals', execToken, { amount: 300, card_number: '4111111111111111' });
+    // Минимумы по способу: СБП — 500 ₽, карта — 4000 ₽
+    const rMin = await api('POST', '/wallet/withdrawals', execToken,
+      { amount: 400, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'deposited' });
+    if (rMin.status === 400) ok(13, 'Withdrawal below СБП minimum (400 < 500) → 400');
+    else fail(13, 'Expected 400 below СБП minimum', `status=${rMin.status} ${JSON.stringify(rMin.body)}`);
+
+    const rCardMin = await api('POST', '/wallet/withdrawals', execToken,
+      { amount: 1000, card_number: '4111111111111111', withdrawal_method: 'card', source_balance: 'deposited' });
+    if (rCardMin.status === 400) ok(13, 'Withdrawal below card minimum (1000 < 4000) → 400');
+    else fail(13, 'Expected 400 below card minimum', `status=${rCardMin.status} ${JSON.stringify(rCardMin.body)}`);
+
+    // Вывод с «заработанного», когда там пусто, — отказ даже при полном общем балансе
+    const rEmptyBucket = await api('POST', '/wallet/withdrawals', execToken,
+      { amount: 500, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'earned' });
+    if (rEmptyBucket.status === 400 && rEmptyBucket.body.code === 'INSUFFICIENT_BUCKET_BALANCE')
+      ok(13, 'Withdrawal from empty earned_balance → 400 INSUFFICIENT_BUCKET_BALANCE (смешанный вывод запрещён)');
+    else
+      fail(13, 'Expected 400 INSUFFICIENT_BUCKET_BALANCE', `status=${rEmptyBucket.status} ${JSON.stringify(rEmptyBucket.body)}`);
+
+    const r = await api('POST', '/wallet/withdrawals', execToken,
+      { amount: 500, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'deposited' });
     if (r.status === 201 && r.body.id) {
       withdrawalId = r.body.id;
       const balAfterReq = await getBalance(execId);
       const deducted = Math.round((balBefore - balAfterReq) * 100) / 100;
-      if (Math.abs(deducted - 300) < 0.01)
+      if (Math.abs(deducted - 500) < 0.01)
         ok(13, `Withdrawal requested, balance deducted: ${deducted} ₽`);
       else
         fail(13, 'Balance deduction on withdrawal', `deducted=${deducted}`);
@@ -434,9 +463,9 @@ async function run() {
         .select('amount, platform_profit')
         .eq('user_id', execId).eq('type', 'withdrawal')
         .order('created_at', { ascending: false }).limit(1).single();
-      const expectedProfit = Math.round(300 * 0.1 * 100) / 100;
-      if (wTx && Math.abs(parseFloat(wTx.amount) - 300) < 0.01 && Math.abs(parseFloat(wTx.platform_profit ?? 0) - expectedProfit) < 0.01)
-        ok(13, `Withdrawal transaction: amount=${wTx.amount} ₽, platform_profit=${wTx.platform_profit} ₽ (10%)`);
+      const expectedProfit = Math.round(500 * 0.1 * 100) / 100;
+      if (wTx && Math.abs(parseFloat(wTx.amount) - 500) < 0.01 && Math.abs(parseFloat(wTx.platform_profit ?? 0) - expectedProfit) < 0.01)
+        ok(13, `Withdrawal transaction: amount=${wTx.amount} ₽, platform_profit=${wTx.platform_profit} ₽ (10% с занесённого)`);
       else
         fail(13, 'Withdrawal commission mismatch', JSON.stringify(wTx));
     } else {
@@ -447,19 +476,23 @@ async function run() {
   // ── Step 14: Withdrawal reject → balance restored ─────────────────────────
   console.log('\nStep 14 — Withdrawal reject → refund balance');
   try {
-    await setBalance(execId, 1000);
+    // На «заработанном» балансе: комиссии нет, возврат при отказе — туда же
+    await setBalance(execId, 1000, 'earned');
     const balBefore = await getBalance(execId);
-    const rw = await api('POST', '/wallet/withdrawals', execToken, { amount: 200, card_number: '4111111111111111' });
+    const rw = await api('POST', '/wallet/withdrawals', execToken,
+      { amount: 500, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'earned' });
     if (rw.status !== 201) { fail(14, 'Create withdrawal for reject', JSON.stringify(rw.body)); }
     else {
       const wid = rw.body.id;
       const r = await api('POST', `/admin/withdrawals/${wid}/reject`, adminToken, { admin_comment: 'Тест отклонения' });
       if (r.status === 200) {
         const balAfter = await getBalance(execId);
-        if (Math.abs(balAfter - balBefore) < 0.01)
-          ok(14, `Withdrawal rejected, balance restored: ${balAfter} ₽`);
+        const { data: p } = await adminSupabase.from('profiles')
+          .select('earned_balance').eq('id', execId).single();
+        if (Math.abs(balAfter - balBefore) < 0.01 && Math.abs(parseFloat(p?.earned_balance ?? 0) - balBefore) < 0.01)
+          ok(14, `Withdrawal rejected, balance restored to earned_balance: ${balAfter} ₽`);
         else
-          fail(14, 'Balance after rejection', `before=${balBefore} after=${balAfter}`);
+          fail(14, 'Balance after rejection', `before=${balBefore} after=${balAfter} earned=${p?.earned_balance}`);
       } else {
         fail(14, 'Admin reject withdrawal', `status=${r.status} ${JSON.stringify(r.body)}`);
       }

@@ -6,6 +6,7 @@ const { serverError } = require('../utils/httpError');
 const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
+const { marketplaceCommissionPct, chargeWithCommission, round2 } = require('../utils/commission');
 
 const router = Router();
 
@@ -40,6 +41,14 @@ function validateListing({ title, description, price, deposit_amount, requires_c
     return 'Укажите, для чего нужен обмен контактами';
   return null;
 }
+
+// Цена, которую видит и платит покупатель = цена исполнителя + комиссия биржи.
+// listing.price при этом остаётся тем, что получит исполнитель (и тем, что он
+// вводит в форме) — две стороны видят разные числа за одну и ту же услугу.
+const buyerPrice = (listing, pct) => ({
+  price_with_commission: chargeWithCommission(parseFloat(listing.price ?? 0), pct),
+  commission_pct: pct,
+});
 
 // ── GET /listings/categories ──────────────────────────────────────────────────
 router.get('/categories', async (req, res) => {
@@ -96,9 +105,13 @@ router.get('/', optionalAuth, async (req, res) => {
     const s = search.trim().toLowerCase();
     result = result.filter(l => l.title.toLowerCase().includes(s) || l.description.toLowerCase().includes(s));
   }
+  // В каталоге услуг покупатель видит цену сразу с комиссией (то, что спишется),
+  // а listing.price остаётся тем, что получит исполнитель. Витрина показывает
+  // price_with_commission, форма редактирования — price.
+  const pct = await marketplaceCommissionPct();
   // sort before withIsVip — it strips the vip_expires_at the sort keys off
   res.json(sortFeed(result, sort, l => l.owner, 'rating_as_executor')
-    .map(l => ({ ...l, owner: withIsVip(l.owner) })));
+    .map(l => ({ ...l, owner: withIsVip(l.owner), ...buyerPrice(l, pct) })));
 });
 
 // ── GET /listings/mine ────────────────────────────────────────────────────────
@@ -127,7 +140,8 @@ router.get('/:id', auth, async (req, res) => {
   if (!listing.is_active && !isOwner && !prof?.is_admin)
     return res.status(404).json({ error: 'Услуга не найдена' });
 
-  res.json({ ...listing, owner: withIsVip(listing.owner) });
+  const pct = await marketplaceCommissionPct();
+  res.json({ ...listing, owner: withIsVip(listing.owner), ...buyerPrice(listing, pct) });
 });
 
 // ── PATCH /listings/:id ───────────────────────────────────────────────────────
@@ -188,9 +202,14 @@ router.post('/:id/order', auth, isBanned, async (req, res) => {
   if (!listing.is_active) return res.status(400).json({ error: 'Услуга недоступна' });
   if (listing.owner_id === req.userId) return res.status(400).json({ error: 'Нельзя заказать собственную услугу' });
 
+  // Цена услуги одинакова для обеих сторон: исполнитель получит price,
+  // с заказчика списывается price + комиссия биржи. Залог наценкой не
+  // облагается — он возвращается заказчику целиком.
   const price      = Math.round(parseFloat(listing.price) * 100) / 100;
   const deposit    = Math.round(parseFloat(listing.deposit_amount ?? 0) * 100) / 100;
-  const reserved   = Math.round((price + deposit) * 100) / 100;
+  const pct        = await marketplaceCommissionPct();
+  const commission = round2(chargeWithCommission(price, pct) - price);
+  const reserved   = round2(price + commission + deposit);
 
   // Check and deduct balance
   const { data: profile } = await supabase.from('profiles').select('balance').eq('id', req.userId).single();
@@ -217,7 +236,7 @@ router.post('/:id/order', auth, isBanned, async (req, res) => {
     base_amount:              price,
     final_amount:             price,
     reserved_amount:          reserved,
-    commission_amount:        0,
+    commission_amount:        commission,
     deposit_amount:           deposit,
     requires_contact_exchange: listing.requires_contact_exchange,
     contact_exchange_reason:  listing.contact_exchange_reason,
@@ -231,7 +250,7 @@ router.post('/:id/order', auth, isBanned, async (req, res) => {
 
   // Transactions
   const txInserts = [
-    { user_id: req.userId, order_id: order.id, type: 'order_payment', amount: price, status: 'completed' },
+    { user_id: req.userId, order_id: order.id, type: 'order_payment', amount: round2(price + commission), status: 'completed' },
   ];
   if (deposit > 0) {
     txInserts.push({ user_id: req.userId, order_id: order.id, type: 'deposit_hold', amount: deposit, status: 'completed' });

@@ -5,6 +5,7 @@ const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { nextLevelReputation } = require('../utils/reputation');
 const { isVip } = require('../utils/vip');
+const { marketplaceCommissionPct, chargeWithCommission } = require('../utils/commission');
 
 const router = Router();
 router.use(auth);
@@ -102,7 +103,14 @@ router.get('/:id/services', async (req, res) => {
     .eq('is_active', true)
     .order('created_at', { ascending: false });
   if (error) return serverError(res, error);
-  res.json(data ?? []);
+  // Как и в каталоге услуг: посетитель видит цену с комиссией биржи —
+  // ту, что спишется при заказе (listings.price — доля исполнителя).
+  const pct = await marketplaceCommissionPct();
+  res.json((data ?? []).map(l => ({
+    ...l,
+    price_with_commission: chargeWithCommission(parseFloat(l.price ?? 0), pct),
+    commission_pct: pct,
+  })));
 });
 
 // Fields a user is allowed to update via this endpoint.

@@ -12,8 +12,17 @@ Reputation on `POST /orders/:id/reviews`: applied **only when the reviewee was t
 ## `/listings` (`routes/listings.js`)
 `GET /categories` · `POST /` · `GET /` (optionalAuth) · `GET /mine` · `GET /:id` · `PATCH /:id` · `PATCH /:id/toggle` · `POST /:id/order` (convert listing to order)
 
+Buyer-facing responses (`GET /`, `GET /:id`, and `GET /profile/:id/services`) carry two computed fields on top of the row: `price_with_commission` (what the buyer is actually charged — `price` + `admin_settings.marketplace_commission_pct`) and `commission_pct`. `listings.price` itself stays the executor's take, and that's what the owner enters/edits — the two sides deliberately see different numbers for the same service. `GET /mine` is owner-facing and has neither field.
+
 ## `/wallet` (`routes/wallet.js`)
-`GET /` (balance) · `GET /chart` · `POST /deposits` · `GET /deposits` · `GET /withdrawals` · `POST /withdrawals`
+`GET /` (balance) · `GET /chart` · `POST /deposits` · `GET /deposits` · `GET /withdrawals` · `POST /withdrawals` · `GET /vip/price` · `POST /vip`
+
+`GET /` returns `balance` plus its two halves, `deposited_balance` and `earned_balance` (see `docs/schema.md`).
+
+`POST /withdrawals` takes `{ amount, card_number, withdrawal_method: 'sbp'|'card', source_balance: 'deposited'|'earned' }` (both enums default to `sbp`/`deposited` for older clients). Minimum by method: **СБП 500 ₽, карта 4000 ₽**. Commission by source: deposited = `admin_settings.withdrawal_commission_pct` (10), earned = 0 — flat, no level progression. **One request draws on one balance only**: the deduction goes through `try_subtract_bucket_balance`, so a mixed withdrawal is impossible by construction and a short bucket returns `400 { code: 'INSUFFICIENT_BUCKET_BALANCE' }` even when the *combined* balance would cover it. Two balances = two requests.
+
+## `/settings` (`routes/settings.js`)
+`GET /public/commissions` → `{ withdrawal_commission_pct, marketplace_commission_pct }` (auth, the two rates the UI must show before the user acts) · `GET /:key` (site_settings row). Replaced the narrower `GET /public/withdrawal-commission-pct`.
 
 ## `/conversations` (`routes/conversations.js`)
 `GET /:id/messages` · `POST /:id/messages` (multipart, up to 5 files) · `GET /:id/messages/:msgId/attachments/:attId/download`
@@ -80,7 +89,9 @@ Schedule warmup: `GET /schedule-warmup/status` · `POST /schedule-warmup/start` 
 
 Every filter on both runs in SQL, so `total` counts the filtered set. `/ledger`'s `nickname` used to be applied in Node *after* a hard 500-row fetch, which hid older matches; `/users` used to return every profile row plus a 1000-user page of the GoTrue admin API. Email now comes from `profiles.email` (the column `GET /profile` already reads), so no auth-admin call is involved.
 
-`GET /stats` and `GET /finance/summary` aggregate over **all** rows via `utils/pagedFetch.js` — a single PostgREST select silently stops at `db-max-rows` (1000), and `/stats` additionally had explicit `.limit(2000)` caps. `/stats` gained `vip_users` and `orders_total`; `/finance/summary` gained `vip_revenue`, `vip_purchases_count`, `vip_active_count` (VIP purchases were missing from platform profit entirely).
+`GET /stats` and `GET /finance/summary` aggregate over **all** rows via `utils/pagedFetch.js` — a single PostgREST select silently stops at `db-max-rows` (1000), and `/stats` additionally had explicit `.limit(2000)` caps. `/stats` gained `vip_users` and `orders_total`; `/finance/summary` gained `vip_revenue`, `vip_purchases_count`, `vip_active_count` (VIP purchases were missing from platform profit entirely) and `commission_marketplace` (the marketplace markup, summed off `platform_profit` on `order_payout` rows). `/stats`'s `total_commission_earned` sums both `withdrawal` and `order_payout` profit.
+
+`GET /admin/withdrawals` computes `commission_pct` and `payout_amount` per row server-side from `source_balance` — the admin UI no longer derives the payout itself.
 
 ## Known spec deviations (see `TODO_BACKEND.md` for full detail)
 - `market_orders`/`market_services` don't exist as separate concepts — use `orders`/`listings`.

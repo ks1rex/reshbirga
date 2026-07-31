@@ -24,12 +24,16 @@ async function checkAndAutoConfirm(order) {
     })
     .eq('id', order.id)
     .eq('status', 'awaiting_confirmation')
-    .select('id')
+    // commission_amount берём из вернувшейся строки: вызывающие
+    // (/orders/mine, /orders/applied) его в свой select не включают.
+    .select('id, commission_amount')
     .maybeSingle();
 
   if (!updated) return false; // Already changed by another request
 
-  await supabase.rpc('add_wallet_balance', { p_user_id: order.executor_id, p_amount: payoutAmount });
+  // Выплата — на «заработанный» баланс, комиссия биржи — доход платформы
+  // в момент завершения сделки (см. utils/commission.js).
+  await supabase.rpc('add_earned_balance', { p_user_id: order.executor_id, p_amount: payoutAmount });
 
   await supabase.from('transactions').insert({
     user_id: order.executor_id,
@@ -37,6 +41,7 @@ async function checkAndAutoConfirm(order) {
     type: 'order_payout',
     amount: payoutAmount,
     status: 'completed',
+    platform_profit: Math.round(parseFloat(updated.commission_amount ?? 0) * 100) / 100,
   });
 
   // Fire-and-forget AI chat check after auto-completion

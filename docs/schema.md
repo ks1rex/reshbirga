@@ -47,7 +47,7 @@ Exact columns/constraints live in the migration files; this is a table-of-conten
 - `handle_new_user()` (0011, redefined 0024 for referrals), `update_profile_ratings()` (0011)
 - `handle_executor_assigned()` (0014)
 - `add_balance_pending` / `subtract_balance_pending_add_available` (0015)
-- `add_wallet_balance` / `try_subtract_wallet_balance` (0016) — atomic RPCs for wallet balance mutation
+- `add_wallet_balance` / `try_subtract_wallet_balance` (0016, rewritten `20260731120000`) / `add_earned_balance` / `try_subtract_bucket_balance` (`20260731120000`) — atomic RPCs for wallet balance mutation, split-balance aware (see "Two balances" below)
 - `add_referral_earnings` (0024b)
 - `update_profile_average_rating`, `grant_early_bird` (0025)
 - `claim_referral_bonus_slot` (real version: `20260613214919`/`referral_slot_rpc`, see "0011–0036 do not reflect the live database" above) — atomic, race-free referral-slot cap enforcement (`SELECT ... FOR UPDATE`)
@@ -62,8 +62,20 @@ Exact columns/constraints live in the migration files; this is a table-of-conten
 ## Storage
 S3-compatible bucket configured in `0012_storage_bucket.sql`, used for order/message attachments.
 
+## Two balances (`20260731120000_split_balances_and_marketplace_commission.sql`)
+
+`profiles.balance` is now the **sum** of `profiles.deposited_balance` (from top-ups) and `profiles.earned_balance` (marketplace payouts + referral bonuses), held by `CHECK (balance = deposited_balance + earned_balance)`. `balance` stays the column every reader uses (Navbar, feeds, admin, Sait) — the split only changes *how* money moves:
+
+- **Spending** (marketplace, VIP, GOST tokens) → `try_subtract_wallet_balance(uuid, numeric)`, unchanged signature, now debits `deposited_balance` first and spills into `earned_balance`. `purchase_vip` and `buy_gost_tokens` call it instead of touching `balance` themselves; the 3-arg `buy_gost_tokens` overload was dropped (dead, and it wrote `balance` directly).
+- **Crediting** → `add_wallet_balance` = deposited (so every existing refund/rollback caller stays correct by default), `add_earned_balance` = earned (executor payouts, forfeited deposits on a dispute, referral bonuses in `confirm_deposit_request`).
+- **Withdrawal** → `try_subtract_bucket_balance(uuid, numeric, 'deposited'|'earned')`, single bucket only.
+
+A refund always lands in `deposited_balance` regardless of which bucket funded it (`ponytail:` comment on `add_wallet_balance`): crediting refunds to `earned` would let anyone launder deposited money past the 10% withdrawal fee via create-order-then-cancel. Restoring the exact source would mean storing the split on the order.
+
+`withdrawal_requests` gained `withdrawal_method` (`sbp`|`card`, CHECK) and `source_balance` (`deposited`|`earned`, CHECK) — minimums 500/4000 ₽ and the 10%/0% commission split are enforced in `routes/wallet.js` and `routes/admin.js`, not the DB.
+
 ## Business parameters (`admin_settings`)
-Key/value table, not covered by a migration entry above since it holds tunable business params rather than schema. Current documented values: `withdrawal_commission_pct` = 10 (platform cut, held on withdrawal — see root `CLAUDE.md`), `referral_bonus_pct` = 5 (referrer's cut of a referred user's first 3 deposits, default fallback in `backend/src/routes/admin.js` line 444 if the key is unset). Check this table directly for current values before hardcoding a rate elsewhere.
+Key/value table, not covered by a migration entry above since it holds tunable business params rather than schema. Current documented values: `withdrawal_commission_pct` = 10 (held on withdrawal **from `deposited_balance` only**), `marketplace_commission_pct` = 10 (buyer-side markup on orders/listings; the seller receives the displayed price, the buyer pays price × 1.10, and the difference is recognised as platform profit on the `order_payout` ledger row at completion), `referral_bonus_pct` = 5 (referrer's cut of a referred user's first 3 deposits, default fallback in `backend/src/routes/admin.js` line 444 if the key is unset). Check this table directly for current values before hardcoding a rate elsewhere.
 
 `vip_level_discounts` is the one non-scalar key: ten comma-separated percents (levels 1…10), validated by the `pct_list` kind, empty/unset = the built-in default curve (`utils/vip.js` `DEFAULT_LEVEL_DISCOUNTS` — `0,10,…,80,100`). `parseLevelDiscounts` falls back to that default on anything malformed rather than pricing a subscription at zero, so a hand-edited bad value degrades instead of giving away VIP.
 

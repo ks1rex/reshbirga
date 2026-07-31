@@ -5,18 +5,24 @@ const { serverError } = require('../utils/httpError');
 
 const router = Router();
 
-// GET /settings/public/withdrawal-commission-pct — the one admin_settings value
-// users need to see before submitting a withdrawal (rest of admin_settings stays admin-only).
-router.get('/public/withdrawal-commission-pct', auth, async (req, res) => {
+// GET /settings/public/commissions — ставки, которые пользователь должен видеть
+// до действия: комиссия за вывод занесённых денег и наценка биржи к цене заказа.
+// Остальной admin_settings остаётся админским.
+router.get('/public/commissions', auth, async (req, res) => {
   const { data, error } = await supabase
     .from('admin_settings')
-    .select('value')
-    .eq('key', 'withdrawal_commission_pct')
-    .maybeSingle();
+    .select('key, value')
+    .in('key', ['withdrawal_commission_pct', 'marketplace_commission_pct']);
 
   if (error) return serverError(res, error);
-  const pct = parseFloat(data?.value);
-  res.json({ withdrawal_commission_pct: Number.isFinite(pct) ? pct : 10 });
+  const num = (key, fallback) => {
+    const pct = parseFloat((data ?? []).find(r => r.key === key)?.value);
+    return Number.isFinite(pct) ? pct : fallback;
+  };
+  res.json({
+    withdrawal_commission_pct: num('withdrawal_commission_pct', 10),
+    marketplace_commission_pct: num('marketplace_commission_pct', 10),
+  });
 });
 
 // GET /settings/:key — any authenticated user

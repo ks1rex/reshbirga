@@ -13,7 +13,7 @@ router.use(auth);
 router.get('/', async (req, res) => {
   const [profileRes, depositsRes, withdrawalsRes] = await Promise.all([
     supabase.from('profiles')
-      .select('balance, referral_code, referral_earnings, referral_registered_count, vip_expires_at')
+      .select('balance, deposited_balance, earned_balance, referral_code, referral_earnings, referral_registered_count, vip_expires_at')
       .eq('id', req.userId).single(),
     supabase.from('deposit_requests')
       .select('id, claimed_amount, confirmed_amount, credited_amount, status, admin_comment, created_at')
@@ -21,7 +21,7 @@ router.get('/', async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(5),
     supabase.from('withdrawal_requests')
-      .select('id, amount, card_number, status, admin_comment, created_at')
+      .select('id, amount, card_number, withdrawal_method, source_balance, status, admin_comment, created_at')
       .eq('user_id', req.userId)
       .order('created_at', { ascending: false })
       .limit(5),
@@ -35,6 +35,8 @@ router.get('/', async (req, res) => {
 
   res.json({
     balance: parseFloat(prof?.balance ?? 0),
+    deposited_balance: parseFloat(prof?.deposited_balance ?? 0),
+    earned_balance: parseFloat(prof?.earned_balance ?? 0),
     referral_code: referralCode,
     referral_link: referralCode ? `${frontendBase}/register?ref=${referralCode}` : null,
     referral_earnings: parseFloat(prof?.referral_earnings ?? 0),
@@ -130,7 +132,7 @@ router.get('/deposits', async (req, res) => {
 router.get('/withdrawals', async (req, res) => {
   const { data, error } = await supabase
     .from('withdrawal_requests')
-    .select('id, amount, card_number, status, admin_comment, created_at')
+    .select('id, amount, card_number, withdrawal_method, source_balance, status, admin_comment, created_at')
     .eq('user_id', req.userId)
     .order('created_at', { ascending: false })
     .limit(100);
@@ -138,39 +140,66 @@ router.get('/withdrawals', async (req, res) => {
   res.json(data ?? []);
 });
 
+// Минимум вывода зависит от способа: СБП дешевле в обработке, карта — дороже.
+const WITHDRAWAL_MIN = { sbp: 500, card: 4000 };
+const METHOD_LABEL   = { sbp: 'СБП', card: 'карта' };
+const SOURCE_LABEL   = { deposited: 'занесённый', earned: 'заработанный' };
+
 // POST /wallet/withdrawals — create withdrawal request (deducts balance as reserve)
+//
+// Заявка всегда с одного баланса: смешанного вывода нет. Если на занесённом
+// не хватает, а на заработанном есть — это две отдельные заявки, потому что у
+// них разная комиссия (10% против 0%), и одна строка withdrawal_requests не
+// может нести две ставки сразу.
 router.post('/withdrawals', isBanned, async (req, res) => {
   const amount = parseFloat(req.body.amount);
   const card_number = req.body.card_number?.trim();
+  const method = req.body.withdrawal_method ?? 'sbp';
+  const source = req.body.source_balance ?? 'deposited';
 
   if (!amount || amount <= 0 || isNaN(amount))
     return res.status(400).json({ error: 'Укажите сумму больше 0' });
+  if (!WITHDRAWAL_MIN[method])
+    return res.status(400).json({ error: 'Некорректный способ вывода (sbp/card)' });
+  if (!SOURCE_LABEL[source])
+    return res.status(400).json({ error: 'Некорректный баланс списания (deposited/earned)' });
+  if (amount < WITHDRAWAL_MIN[method])
+    return res.status(400).json({ error: `Минимальная сумма вывода на ${METHOD_LABEL[method]} — ${WITHDRAWAL_MIN[method]} ₽` });
   if (!card_number)
-    return res.status(400).json({ error: 'Укажите номер карты' });
+    return res.status(400).json({ error: 'Укажите реквизиты для вывода' });
   if (card_number.length > 100)
-    return res.status(400).json({ error: 'Номер карты слишком длинный' });
+    return res.status(400).json({ error: 'Реквизиты слишком длинные' });
 
-  // Atomic deduct — fails if balance insufficient
+  // Atomic deduct from the chosen bucket only — fails if that bucket is short,
+  // даже если суммарного баланса хватило бы.
   const { data: ok, error: rpcErr } = await supabase
-    .rpc('try_subtract_wallet_balance', { p_user_id: req.userId, p_amount: amount });
+    .rpc('try_subtract_bucket_balance', { p_user_id: req.userId, p_amount: amount, p_bucket: source });
 
   if (rpcErr) return serverError(res, rpcErr, 'wallet:withdraw:rpc');
-  if (!ok) return res.status(400).json({ error: 'Недостаточно средств на балансе' });
+  if (!ok) return res.status(400).json({
+    error: `Недостаточно средств на балансе «${SOURCE_LABEL[source]}»`,
+    code: 'INSUFFICIENT_BUCKET_BALANCE',
+  });
 
   const { data, error } = await supabase
     .from('withdrawal_requests')
-    .insert({ user_id: req.userId, amount, card_number, status: 'pending' })
+    .insert({ user_id: req.userId, amount, card_number, status: 'pending',
+              withdrawal_method: method, source_balance: source })
     .select()
     .single();
 
   if (error) {
-    // Roll back the balance deduction
-    await supabase.rpc('add_wallet_balance', { p_user_id: req.userId, p_amount: amount });
+    // Roll back the deduction into the same bucket it came from
+    await supabase.rpc(source === 'earned' ? 'add_earned_balance' : 'add_wallet_balance',
+      { p_user_id: req.userId, p_amount: amount });
     return serverError(res, error);
   }
 
   const { data: prof } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
-  sendTelegram(`💸 Заявка на вывод\nПользователь: @${prof?.nickname ?? req.userId}\nСумма: ${amount} ₽ на карту ${card_number}`);
+  sendTelegram(
+    `💸 Заявка на вывод\nПользователь: @${prof?.nickname ?? req.userId}\n` +
+    `Сумма: ${amount} ₽ (${SOURCE_LABEL[source]} баланс) на ${METHOD_LABEL[method]}: ${card_number}`
+  );
 
   res.status(201).json(data);
 });

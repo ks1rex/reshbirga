@@ -106,7 +106,7 @@ router.post('/disputes/:id/resolve', async (req, res) => {
       resolved_at: now,
     })
     .eq('id', id).eq('status', 'open')
-    .select(`id, orders!inner(id, customer_id, executor_id, final_amount, reserved_amount, deposit_amount)`);
+    .select(`id, orders!inner(id, customer_id, executor_id, final_amount, reserved_amount, deposit_amount, commission_amount)`);
 
   if (claimErr) return serverError(res, claimErr, 'dispute:resolve:claim');
   if (!claimedRows?.length) return res.status(409).json({ error: 'Спор уже разрешён или не найден' });
@@ -118,15 +118,17 @@ router.post('/disputes/:id/resolve', async (req, res) => {
 
   if (normalised === 'pay_executor') {
     await supabase.from('orders').update({ status: 'completed', completed_at: now }).eq('id', order.id);
-    // Executor gets final_amount (price)
-    await supabase.rpc('add_wallet_balance', { p_user_id: order.executor_id, p_amount: finalAmt });
+    // Executor gets final_amount (price) — на «заработанный» баланс; комиссия
+    // биржи признаётся доходом здесь же, как и при обычном завершении заказа.
+    await supabase.rpc('add_earned_balance', { p_user_id: order.executor_id, p_amount: finalAmt });
     await supabase.from('transactions').insert({
       user_id: order.executor_id, order_id: order.id,
       type: 'order_payout', amount: finalAmt, status: 'completed',
+      platform_profit: Math.round(parseFloat(order.commission_amount ?? 0) * 100) / 100,
     });
     // Deposit is forfeited to executor (if any)
     if (depositAmt > 0) {
-      await supabase.rpc('add_wallet_balance', { p_user_id: order.executor_id, p_amount: depositAmt });
+      await supabase.rpc('add_earned_balance', { p_user_id: order.executor_id, p_amount: depositAmt });
       await supabase.from('transactions').insert({
         user_id: order.executor_id, order_id: order.id,
         type: 'deposit_forfeit', amount: depositAmt, status: 'completed',
@@ -235,9 +237,10 @@ router.get('/stats', async (req, res) => {
     // Commission moved from deposit to withdrawal (stage 1) — deposits are 1:1 now,
     // so confirmed_amount - credited_amount on deposit_requests is always 0. Source
     // from transactions.platform_profit on completed withdrawals instead, matching
-    // /admin/finance/summary's commission_regular.
+    // /admin/finance/summary's commission_regular. Плюс комиссия биржи, которая
+    // пишется в platform_profit выплаты исполнителю (order_payout).
     sumAll(
-      () => supabase.from('transactions').select('platform_profit').eq('type', 'withdrawal').eq('status', 'completed'),
+      () => supabase.from('transactions').select('platform_profit').in('type', ['withdrawal', 'order_payout']).eq('status', 'completed'),
       'platform_profit',
     ),
   ]);
@@ -472,24 +475,45 @@ router.post('/deposits/:id/reject', async (req, res) => {
 
 // ─── Withdrawals ─────────────────────────────────────────────
 
+// Комиссия за вывод зависит от источника: занесённые деньги — ставка из
+// admin_settings (10%), заработанные на бирже — 0%. Одна точка правды на
+// бэкенде, фронт (админка и кошелёк) только показывает результат.
+async function withdrawalCommissionPct(sourceBalance) {
+  if (sourceBalance === 'earned') return 0;
+  const { data } = await supabase
+    .from('admin_settings').select('value').eq('key', 'withdrawal_commission_pct').maybeSingle();
+  const pct = parseFloat(data?.value);
+  return Number.isFinite(pct) ? pct : 10;
+}
+
 // GET /admin/withdrawals?status=pending
 router.get('/withdrawals', async (req, res) => {
   const { status } = req.query;
   let q = supabase
     .from('withdrawal_requests')
-    .select('id, amount, card_number, status, admin_comment, created_at, user:profiles!withdrawal_requests_user_id_fkey(id, nickname)')
+    .select('id, amount, card_number, withdrawal_method, source_balance, status, admin_comment, created_at, user:profiles!withdrawal_requests_user_id_fkey(id, nickname)')
     .order('created_at', { ascending: false });
   if (status) q = q.eq('status', status);
   const { data, error } = await q;
   if (error) return serverError(res, error);
-  res.json(data ?? []);
+
+  const depositedPct = await withdrawalCommissionPct('deposited');
+  res.json((data ?? []).map(w => {
+    const pct    = w.source_balance === 'earned' ? 0 : depositedPct;
+    const amount = parseFloat(w.amount ?? 0);
+    return {
+      ...w,
+      commission_pct: pct,
+      payout_amount: Math.round(amount * (1 - pct / 100) * 100) / 100,
+    };
+  }));
 });
 
 // POST /admin/withdrawals/:id/confirm
 router.post('/withdrawals/:id/confirm', async (req, res) => {
   const { data: wr } = await supabase
     .from('withdrawal_requests')
-    .select('id, status, user_id, amount')
+    .select('id, status, user_id, amount, source_balance')
     .eq('id', req.params.id)
     .single();
 
@@ -509,12 +533,9 @@ router.post('/withdrawals/:id/confirm', async (req, res) => {
   // payout to the user (amount × (1 − pct)) happens manually by the admin/bank —
   // the reserved full `amount` was already deducted at withdrawal creation, and
   // platform_profit here just records the commission for the finance summary.
-  const { data: settingRow } = await supabase
-    .from('admin_settings')
-    .select('value')
-    .eq('key', 'withdrawal_commission_pct')
-    .single();
-  const commissionPct = Number.isFinite(parseFloat(settingRow?.value)) ? parseFloat(settingRow.value) : 10;
+  // Ставка плоская и зависит только от источника: занесённый — 10%,
+  // заработанный — 0% (прогрессии по уровню нет).
+  const commissionPct  = await withdrawalCommissionPct(wr.source_balance);
   const amount         = parseFloat(wr.amount);
   const platformProfit = Math.round(amount * (commissionPct / 100) * 100) / 100;
 
@@ -535,7 +556,7 @@ router.post('/withdrawals/:id/reject', async (req, res) => {
 
   const { data: wr } = await supabase
     .from('withdrawal_requests')
-    .select('id, status, user_id, amount')
+    .select('id, status, user_id, amount, source_balance')
     .eq('id', req.params.id)
     .single();
 
@@ -551,8 +572,9 @@ router.post('/withdrawals/:id/reject', async (req, res) => {
   if (!claimed || claimed.length === 0)
     return res.status(409).json({ error: 'Заявка уже обработана' });
 
-  // Refund the reserved balance
-  await supabase.rpc('add_wallet_balance', { p_user_id: wr.user_id, p_amount: parseFloat(wr.amount) });
+  // Refund the reserved balance — обратно в тот же баланс, откуда списали
+  await supabase.rpc(wr.source_balance === 'earned' ? 'add_earned_balance' : 'add_wallet_balance',
+    { p_user_id: wr.user_id, p_amount: parseFloat(wr.amount) });
 
   res.json({ success: true });
 });
@@ -783,6 +805,8 @@ router.put('/settings/:key', async (req, res) => {
 // ponytail: flat lookup table, add an entry here when adding a new tunable setting.
 const ADMIN_SETTING_VALIDATORS = {
   withdrawal_commission_pct: 'percent',
+  // наценка покупателю на бирже: +% сверх отображаемой цены, продавцу — цена целиком
+  marketplace_commission_pct: 'percent',
   vip_token_discount_pct:    'percent',
   // 10 процентов через запятую — скидка на подписку для уровней 1..10
   vip_level_discounts:       'pct_list',
@@ -866,7 +890,7 @@ router.get('/finance/summary', async (req, res) => {
   const [txRes, balRes, expRes, vipUsersRes] = await Promise.all([
     fetchAll(() => supabase.from('transactions')
       .select('type, amount, platform_profit')
-      .in('type', ['withdrawal', 'deposit_referral', 'referral_bonus', 'balance_to_token', 'vip_purchase'])
+      .in('type', ['withdrawal', 'deposit_referral', 'referral_bonus', 'balance_to_token', 'vip_purchase', 'order_payout'])
       .eq('status', 'completed')),
     fetchAll(() => supabase.from('profiles').select('balance')),
     supabase.from('admin_settings').select('value').eq('key', 'platform_expenses').single(),
@@ -889,13 +913,17 @@ router.get('/finance/summary', async (req, res) => {
   // p_price). It was missing from this summary entirely.
   const vip_revenue           = sumBy('vip_purchase', 'platform_profit');
   const vip_purchases_count   = txs.filter(t => t.type === 'vip_purchase').length;
-  const total_platform_profit = round2(commission_regular + commission_referral - referral_bonuses_paid + gost_tokens_revenue + vip_revenue);
+  // Комиссия биржи (+10% к цене для покупателя) пишется в platform_profit
+  // выплаты исполнителю и признаётся в момент завершения сделки.
+  const commission_marketplace = sumBy('order_payout', 'platform_profit');
+  const total_platform_profit = round2(commission_regular + commission_referral - referral_bonuses_paid + gost_tokens_revenue + vip_revenue + commission_marketplace);
   const total_user_balances   = round2((balRes.data ?? []).reduce((s, p) => s + (parseFloat(p.balance) || 0), 0));
   const platform_expenses     = parseFloat(expRes.data?.value ?? '0');
   const available_to_withdraw = round2(total_platform_profit - platform_expenses);
 
   res.json({
     commission_regular,
+    commission_marketplace,
     commission_referral,
     referral_bonuses_paid,
     gost_tokens_revenue,
