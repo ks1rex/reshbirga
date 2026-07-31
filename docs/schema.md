@@ -60,7 +60,7 @@ Exact columns/constraints live in the migration files; this is a table-of-conten
 **Every money-moving RPC must `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` and `GRANT ... TO service_role` in the same migration that creates it** — see CLAUDE.md's "Migration history" section for why (Postgres's default grant otherwise makes it directly callable via PostgREST, bypassing the Express admin gate entirely). All RPCs listed above (except the RLS-policy helpers `is_admin()`/`is_conversation_participant()`) had this fixed on 2026-07-16.
 
 ## Storage
-S3-compatible bucket configured in `0012_storage_bucket.sql`, used for order/message attachments.
+S3-compatible bucket `order-attachments` (private, 10 MB limit), used for order attachments (`routes/orders.js`). Created live by `20260801120000_create_order_attachments_bucket.sql` — `0012_storage_bucket.sql` (same `INSERT`) is unapplied dead history like the rest of `0011`–`0036` (see CLAUDE.md "Migration history"), so the bucket didn't actually exist until 2026-08-01, and every upload/download call 404'd until then. No `storage.objects` RLS policy: the bucket is only ever touched through `supabase_client.js` (service-role, bypasses RLS), which already gates access to order participants/admin in-route before upload or `createSignedUrl` — consistent with "routes are the actual authorization boundary, not the DB" (see Architecture in CLAUDE.md). `storage.objects` has RLS enabled with zero policies for this bucket, so anon/authenticated keys are denied by default regardless.
 
 ## Two balances (`20260731120000_split_balances_and_marketplace_commission.sql`)
 
