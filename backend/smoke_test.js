@@ -102,6 +102,43 @@ async function getBalance(userId) {
   return parseFloat(data?.balance ?? 0);
 }
 
+// Тестовые аккаунты сами по себе каскадно чистят большинство своих данных
+// при удалении из auth.users, но несколько таблиц держат RESTRICT на
+// profiles/orders (orders.customer_id, disputes.order_id/opened_by,
+// reviews.order_id/reviewer_id/reviewee_id, deposit/withdrawal_requests,
+// support_tickets, forum_threads/forum_posts) — их надо удалить первыми,
+// иначе deleteUser упадёт с ошибкой FK.
+async function cleanupTestData(ids) {
+  if (!ids.length) return;
+  try {
+    const { data: asCust } = await adminSupabase.from('orders').select('id').in('customer_id', ids);
+    const { data: asExec } = await adminSupabase.from('orders').select('id').in('executor_id', ids);
+    const orderIds = [...new Set([...(asCust ?? []), ...(asExec ?? [])].map(o => o.id))];
+
+    if (orderIds.length) {
+      await adminSupabase.from('disputes').delete().in('order_id', orderIds);
+      await adminSupabase.from('reviews').delete().in('order_id', orderIds);
+    }
+    await adminSupabase.from('disputes').delete().in('opened_by', ids);
+    await adminSupabase.from('reviews').delete().in('reviewer_id', ids);
+    await adminSupabase.from('reviews').delete().in('reviewee_id', ids);
+    await adminSupabase.from('transactions').delete().in('user_id', ids);
+    await adminSupabase.from('deposit_requests').delete().in('user_id', ids);
+    await adminSupabase.from('withdrawal_requests').delete().in('user_id', ids);
+    await adminSupabase.from('support_tickets').delete().in('user_id', ids);
+    await adminSupabase.from('forum_threads').delete().in('author_id', ids);
+    await adminSupabase.from('forum_posts').delete().in('author_id', ids);
+    if (orderIds.length) await adminSupabase.from('orders').delete().in('id', orderIds);
+
+    for (const id of ids) {
+      const { error } = await adminSupabase.auth.admin.deleteUser(id);
+      if (error) console.error(`  ⚠️  Cleanup: failed to delete user ${id}: ${error.message}`);
+    }
+  } catch (e) {
+    console.error('  ⚠️  Cleanup failed (leftover test data may remain):', e.message);
+  }
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function run() {
@@ -121,6 +158,9 @@ async function run() {
   let depositId, withdrawalId;
   let disputeId;
   let ticketId;
+  const testUserIds = [];
+
+  try {
 
   // ── Step 1: Health check ──────────────────────────────────────────────────
   console.log('Step 1 — Health check');
@@ -133,14 +173,14 @@ async function run() {
   // ── Step 2: Create test users ─────────────────────────────────────────────
   console.log('\nStep 2 — Create test users');
   try {
-    const cust  = await createTestUser('cust');
-    const exec  = await createTestUser('exec');
-    const cust2 = await createTestUser('cust2');
-    const exec2 = await createTestUser('exec2');
+    const cust  = await createTestUser('cust');  testUserIds.push(cust.userId);
+    const exec  = await createTestUser('exec');  testUserIds.push(exec.userId);
+    const cust2 = await createTestUser('cust2'); testUserIds.push(cust2.userId);
+    const exec2 = await createTestUser('exec2'); testUserIds.push(exec2.userId);
     custId  = cust.userId;  execId  = exec.userId;
     cust2Id = cust2.userId; exec2Id = exec2.userId;
     ok(2, `Created cust=${cust.nick}, exec=${exec.nick}, cust2=${cust2.nick}, exec2=${exec2.nick}`);
-  } catch (e) { fail(2, 'createTestUser', e.message); return summary(); }
+  } catch (e) { fail(2, 'createTestUser', e.message); return; }
 
   // ── Step 3: Sign in all users ─────────────────────────────────────────────
   console.log('\nStep 3 — Sign in');
@@ -179,7 +219,7 @@ async function run() {
     cust2Token = await getTokenFor(cust2Id);
     exec2Token = await getTokenFor(exec2Id);
     ok(3, 'All user tokens obtained');
-  } catch (e) { fail(3, 'Sign-in', e.message); return summary(); }
+  } catch (e) { fail(3, 'Sign-in', e.message); return; }
 
   // ── Step 4: Deposit cycle ─────────────────────────────────────────────────
   console.log('\nStep 4 — Deposit cycle');
@@ -271,7 +311,7 @@ async function run() {
       appId = r1.body.id;
       ok(7, `Executor applied, app id=${appId}`);
     } else {
-      fail(7, 'POST /apply', `status=${r1.status} ${JSON.stringify(r1.body)}`); return summary();
+      fail(7, 'POST /apply', `status=${r1.status} ${JSON.stringify(r1.body)}`); return;
     }
 
     const r2 = await api('POST', `/orders/${orderId}/applications/${appId}/select`, custToken, {});
@@ -312,7 +352,7 @@ async function run() {
       title: 'Smoke отмена', description: '...', subject: 'Химия',
       order_type: 'order', base_amount: 400,
     });
-    if (r.status !== 201) { fail(9, 'Create order for cancel', JSON.stringify(r.body)); return summary(); }
+    if (r.status !== 201) { fail(9, 'Create order for cancel', JSON.stringify(r.body)); return; }
     const cancelOrderId = r.body.id;
     const balAfterCreate = await getBalance(custId);
 
@@ -746,7 +786,10 @@ async function run() {
     }
   } catch (e) { fail(21, 'GOST VIP discount flow', e.message); }
 
-  summary();
+  } finally {
+    console.log('\nCleanup — removing test accounts and their data');
+    await cleanupTestData(testUserIds);
+  }
 }
 
 function summary() {
@@ -756,7 +799,8 @@ function summary() {
   if (failed > 0) console.log(`  ❌ ${failed} FAILED`);
   else console.log('  All tests passed ✅');
   console.log('══════════════════════════════════════════\n');
-  process.exit(failed > 0 ? 1 : 0);
 }
 
-run().catch(e => { console.error('Fatal:', e); process.exit(1); });
+run()
+  .then(() => { summary(); process.exit(failed > 0 ? 1 : 0); })
+  .catch(e => { console.error('Fatal:', e); process.exit(1); });
