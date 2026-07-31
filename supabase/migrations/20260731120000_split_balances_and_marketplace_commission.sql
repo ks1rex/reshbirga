@@ -23,6 +23,10 @@
 -- Реальной отправки денег (PayAnyWay и т.п.) здесь нет и не предполагается —
 -- это только внутренний учёт, см. TODO_BACKEND.md.
 
+-- Одной транзакцией: деньги не должны остаться в полуприменённом состоянии,
+-- если что-то из этого файла упадёт (DDL в Postgres транзакционен).
+BEGIN;
+
 -- ─── 1. Два баланса ──────────────────────────────────────────────────────────
 
 ALTER TABLE profiles
@@ -365,3 +369,5 @@ GRANT  EXECUTE ON FUNCTION buy_gost_tokens(uuid, integer, numeric, jsonb) TO ser
 
 REVOKE EXECUTE ON FUNCTION confirm_deposit_request(uuid, numeric, uuid) FROM PUBLIC, anon, authenticated;
 GRANT  EXECUTE ON FUNCTION confirm_deposit_request(uuid, numeric, uuid) TO service_role;
+
+COMMIT;
