@@ -5,6 +5,7 @@ const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { sendTelegram } = require('../utils/telegramNotify');
 const { vipDiscountPct, applyVipDiscount, parseLevelDiscounts } = require('../utils/vip');
+const { fetchAll } = require('../utils/pagedFetch');
 
 const router = Router();
 router.use(auth);
@@ -138,6 +139,43 @@ router.get('/withdrawals', async (req, res) => {
     .limit(100);
   if (error) return serverError(res, error);
   res.json(data ?? []);
+});
+
+// GET /wallet/referrals — кого пригласил и сколько принёс каждый.
+// Число пополнений приглашённого сознательно не отдаётся: это админская
+// информация, реферер видит только ник и свой заработок.
+router.get('/referrals', async (req, res) => {
+  const { data: invited, error } = await supabase
+    .from('profiles')
+    .select('id, nickname, created_at')
+    .eq('referred_by', req.userId)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) return serverError(res, error);
+  if (!invited?.length) return res.json([]);
+
+  // Бонус привязан к приглашённому через meta.from_user_id — так его пишет
+  // confirm_deposit_request (см. 20260716160000_..._rpc_lockdown.sql).
+  const { data: bonuses, error: txError, truncated } = await fetchAll(() =>
+    supabase.from('transactions')
+      .select('amount, meta')
+      .eq('user_id', req.userId)
+      .eq('type', 'referral_bonus'));
+  if (txError) return serverError(res, txError, 'wallet:referrals');
+  if (truncated) console.warn(`wallet:referrals: bonus list truncated for ${req.userId}`);
+
+  const earned = {};
+  for (const t of bonuses) {
+    const from = t.meta?.from_user_id;
+    if (from) earned[from] = (earned[from] ?? 0) + (parseFloat(t.amount) || 0);
+  }
+
+  res.json(invited.map(u => ({
+    id: u.id,
+    nickname: u.nickname,
+    registered_at: u.created_at,
+    earned: Math.round((earned[u.id] ?? 0) * 100) / 100,
+  })));
 });
 
 // Минимум вывода зависит от способа: СБП дешевле в обработке, карта — дороже.
