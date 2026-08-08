@@ -192,6 +192,20 @@ router.patch('/:id/toggle', auth, isBanned, async (req, res) => {
   res.json(updated);
 });
 
+// ── DELETE /listings/:id ──────────────────────────────────────────────────────
+// Удаление безвозвратное, но безопасное: заказ, созданный по услуге, копирует
+// её данные (см. POST /:id/order) и на строку услуги не ссылается — уже идущие
+// сделки, чаты и отзывы не задеваются.
+router.delete('/:id', auth, isBanned, async (req, res) => {
+  const { data: listing } = await supabase.from('listings').select('owner_id').eq('id', req.params.id).single();
+  if (!listing) return res.status(404).json({ error: 'Услуга не найдена' });
+  if (listing.owner_id !== req.userId) return res.status(403).json({ error: 'Forbidden' });
+
+  const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
+  if (error) return serverError(res, error, 'listing:delete');
+  res.json({ success: true });
+});
+
 // ── POST /listings/:id/order ──────────────────────────────────────────────────
 router.post('/:id/order', auth, isBanned, async (req, res) => {
   const { comment } = req.body;
