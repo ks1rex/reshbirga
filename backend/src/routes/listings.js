@@ -49,7 +49,7 @@ function parseAttachments(raw) {
   return out;
 }
 
-function validateListing({ title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason }) {
+function validateListing({ title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason, cover_url }) {
   if (!title?.trim())       return 'title обязателен';
   if (!description?.trim()) return 'description обязателен';
   if (String(title).length > 200)       return 'Заголовок слишком длинный';
@@ -62,6 +62,10 @@ function validateListing({ title, description, price, deposit_amount, requires_c
   if (d > 1000000)                   return 'Залог слишком большой';
   if (requires_contact_exchange && !contact_exchange_reason?.trim())
     return 'Укажите, для чего нужен обмен контактами';
+  // Обложка — та же проверка префикса, что у вложений: в карточку каталога
+  // нельзя подставить картинку по чужому адресу.
+  if (cover_url && (typeof cover_url !== 'string' || !cover_url.startsWith(MEDIA_PREFIX)))
+    return 'Недопустимая ссылка на обложку';
   return null;
 }
 
@@ -82,7 +86,7 @@ router.get('/categories', async (req, res) => {
 
 // ── POST /listings ────────────────────────────────────────────────────────────
 router.post('/', auth, isBanned, async (req, res) => {
-  const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason, category } = req.body;
+  const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason, category, cover_url } = req.body;
   const validationError = validateListing(req.body);
   if (validationError) return res.status(400).json({ error: validationError });
 
@@ -103,6 +107,7 @@ router.post('/', auth, isBanned, async (req, res) => {
     requires_contact_exchange: !!requires_contact_exchange,
     contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
     category: category || null,
+    cover_url: cover_url || null,
     attachments,
     is_active: true,
   }).select().single();
@@ -183,7 +188,7 @@ router.patch('/:id', auth, isBanned, async (req, res) => {
   const attachments = parseAttachments(req.body.attachments);
   if (typeof attachments === 'string') return res.status(400).json({ error: attachments });
 
-  const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason } = req.body;
+  const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason, cover_url } = req.body;
   const { data: updated, error } = await supabase.from('listings')
     .update({
       title: String(title).trim(),
@@ -192,6 +197,7 @@ router.patch('/:id', auth, isBanned, async (req, res) => {
       deposit_amount: parseFloat(deposit_amount ?? 0),
       requires_contact_exchange: !!requires_contact_exchange,
       contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
+      cover_url: cover_url || null,
       attachments,
       updated_at: new Date().toISOString(),
     })
