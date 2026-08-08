@@ -26,6 +26,29 @@ const CONTACT_EXCHANGE_SYSTEM_MSG = (reason) =>
   `Пожалуйста, фиксируйте момент передачи и возврата (фото/видео) и прикладывайте их в этот чат — без таких подтверждений сайт не может гарантировать честность сделки при споре.\n` +
   `⛔ Попытка договориться и провести сделку в обход платформы (минуя оплату через сайт) — основание для блокировки ОБОИХ аккаунтов.`;
 
+const MAX_ATTACHMENTS = 6;
+// Ссылка обязана вести в наш публичный бакет: иначе в каталог можно было бы
+// подставить любую чужую картинку по внешнему адресу.
+const MEDIA_PREFIX = `${process.env.SUPABASE_URL ?? ''}/storage/v1/object/public/listing-media/`;
+
+// Возвращает нормализованный массив вложений либо строку с ошибкой.
+function parseAttachments(raw) {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) return 'attachments должен быть массивом';
+  if (raw.length > MAX_ATTACHMENTS) return `Не больше ${MAX_ATTACHMENTS} вложений`;
+  const out = [];
+  for (const a of raw) {
+    if (!a || typeof a.url !== 'string') return 'Некорректное вложение';
+    if (!a.url.startsWith(MEDIA_PREFIX)) return 'Недопустимая ссылка на файл';
+    out.push({
+      url: a.url,
+      name: String(a.name ?? '').slice(0, 200),
+      type: String(a.type ?? '').slice(0, 100),
+    });
+  }
+  return out;
+}
+
 function validateListing({ title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason }) {
   if (!title?.trim())       return 'title обязателен';
   if (!description?.trim()) return 'description обязателен';
@@ -63,6 +86,9 @@ router.post('/', auth, isBanned, async (req, res) => {
   const validationError = validateListing(req.body);
   if (validationError) return res.status(400).json({ error: validationError });
 
+  const attachments = parseAttachments(req.body.attachments);
+  if (typeof attachments === 'string') return res.status(400).json({ error: attachments });
+
   const { used, limit } = await getListingUsage(req.userId);
   if (used >= limit) {
     return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.`, code: 'LISTING_LIMIT_REACHED' });
@@ -77,6 +103,7 @@ router.post('/', auth, isBanned, async (req, res) => {
     requires_contact_exchange: !!requires_contact_exchange,
     contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
     category: category || null,
+    attachments,
     is_active: true,
   }).select().single();
   if (error) return serverError(res, error);
@@ -153,6 +180,9 @@ router.patch('/:id', auth, isBanned, async (req, res) => {
   const validationError = validateListing(req.body);
   if (validationError) return res.status(400).json({ error: validationError });
 
+  const attachments = parseAttachments(req.body.attachments);
+  if (typeof attachments === 'string') return res.status(400).json({ error: attachments });
+
   const { title, description, price, deposit_amount, requires_contact_exchange, contact_exchange_reason } = req.body;
   const { data: updated, error } = await supabase.from('listings')
     .update({
@@ -162,6 +192,7 @@ router.patch('/:id', auth, isBanned, async (req, res) => {
       deposit_amount: parseFloat(deposit_amount ?? 0),
       requires_contact_exchange: !!requires_contact_exchange,
       contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
+      attachments,
       updated_at: new Date().toISOString(),
     })
     .eq('id', req.params.id)
