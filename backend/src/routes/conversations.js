@@ -3,7 +3,6 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const auth = require('../middleware/auth');
 const supabase = require('../supabase_client');
-const { detectContactInfo } = require('../utils/contactDetector');
 const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
 const { withIsVip } = require('../utils/vip');
@@ -77,10 +76,13 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
     }
   }
 
-  const requiresContactExchange = conv?.orders?.requires_contact_exchange ?? false;
-  const hasContactInfo = detectContactInfo(content);
-  // No warning if the order explicitly requires contact exchange — it's sanctioned
-  const contactWarning = hasContactInfo && !requiresContactExchange;
+  // ponytail: regex contact-info detection disabled per product decision —
+  // hasContactInfo hardcoded false. Everything downstream (is_contact_info
+  // column, the Telegram flag below, the frontend warning badge) still works
+  // off this variable, so re-enabling is just restoring the detectContactInfo
+  // call (see utils/contactDetector.js) here.
+  const hasContactInfo = false;
+  const contactWarning = false;
 
   const { data: msg, error: msgErr } = await supabase
     .from('messages')
