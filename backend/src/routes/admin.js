@@ -350,7 +350,7 @@ router.patch('/users/:id', async (req, res) => {
       return res.status(400).json({ error: 'Должен остаться хотя бы один администратор' });
     }
   }
-  if (is_owner === false) {
+  if (is_owner === false || is_admin === false) {
     const { count } = await supabase
       .from('profiles')
       .select('id', { count: 'exact', head: true })
@@ -365,6 +365,15 @@ router.patch('/users/:id', async (req, res) => {
   if (is_banned !== undefined) updates.is_banned = is_banned;
   if (is_admin  !== undefined) updates.is_admin  = is_admin;
   if (is_owner  !== undefined) updates.is_owner  = is_owner;
+
+  // is_owner_was — постоянный маркер "когда-то был владельцем", отдельный от
+  // is_owner: его не трогает самостоятельный тумблер «смотреть как админ»
+  // (POST /profile/view-as-admin), только настоящая выдача/отзыв здесь, самим
+  // владельцем. Отзыв админки целиком тоже гасит владельческое наследие —
+  // нет смысла оставлять его тому, кто больше не админ вообще.
+  if (is_owner === true)  updates.is_owner_was = true;
+  if (is_owner === false) updates.is_owner_was = false;
+  if (is_admin === false) { updates.is_owner = false; updates.is_owner_was = false; }
 
   if (Object.keys(updates).length === 0)
     return res.status(400).json({ error: 'No fields to update' });

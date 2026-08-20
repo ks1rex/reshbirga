@@ -199,4 +199,38 @@ router.put('/', isBanned, async (req, res) => {
   res.json(data);
 });
 
+// POST /profile/view-as-admin — self-service toggle for the "смотреть как
+// админ" demo mode. Not a UI-only flag: really flips is_owner, so owner-only
+// routes genuinely 403 while toggled (see migration
+// 20260820130000_add_owner_was.sql for is_owner_was's role).
+//
+// No target state accepted from the client — always re-derives from the
+// freshly read DB row (is_owner/is_owner_was), so a stale/tampered client
+// can't force either direction:
+//   is_owner=true  -> flips to false (is_owner_was untouched)
+//   is_owner=false && is_owner_was=true -> restores to true
+//   otherwise (never granted owner) -> 403
+router.post('/view-as-admin', async (req, res) => {
+  const { data: profile, error: fetchErr } = await supabase
+    .from('profiles')
+    .select('is_owner, is_owner_was')
+    .eq('id', req.userId)
+    .single();
+  if (fetchErr || !profile) return res.status(404).json({ error: 'Профиль не найден' });
+
+  let nextIsOwner;
+  if (profile.is_owner) {
+    nextIsOwner = false;
+  } else if (profile.is_owner_was) {
+    nextIsOwner = true;
+  } else {
+    return res.status(403).json({ error: 'Недоступно' });
+  }
+
+  const { error } = await supabase.from('profiles').update({ is_owner: nextIsOwner }).eq('id', req.userId);
+  if (error) return serverError(res, error, 'profile:view-as-admin');
+
+  res.json({ is_owner: nextIsOwner });
+});
+
 module.exports = router;
