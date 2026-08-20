@@ -4,7 +4,7 @@ const supabase = require('../supabase_client');
 module.exports = async function adminMiddleware(req, res, next) {
   const { data: profile } = await supabase
     .from('profiles')
-    .select('is_admin')
+    .select('is_admin, is_owner')
     .eq('id', req.userId)
     .single();
 
@@ -25,5 +25,16 @@ module.exports = async function adminMiddleware(req, res, next) {
     });
   }
 
+  req.profile = profile;
+  next();
+};
+
+// Second-tier gate: owner-only sections (finance, VIP, GOST templates nav,
+// schedule-warmup, platform settings, stats). Must run after adminMiddleware
+// (needs req.profile.is_owner).
+module.exports.requireOwner = function requireOwner(req, res, next) {
+  if (!req.profile?.is_owner) {
+    return res.status(403).json({ error: 'Требуются права владельца' });
+  }
   next();
 };

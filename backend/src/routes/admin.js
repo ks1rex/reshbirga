@@ -14,6 +14,14 @@ const scheduleWarmup = require('../jobs/scheduleWarmup');
 const router = Router();
 router.use(auth, adminMiddleware);
 
+// Owner-only sections — everything not in the restricted admin's allowed set
+// (споры/форум/заказы/чат/модерация/поддержка/пользователи/2FA-настройки).
+// Path-prefix gate, same pattern as the base auth/adminMiddleware above.
+router.use(
+  ['/ledger', '/stats', '/deposits', '/withdrawals', '/settings', '/admin-settings', '/finance', '/vip', '/schedule-warmup'],
+  adminMiddleware.requireOwner,
+);
+
 // GET /admin/ledger?type=&nickname=&date_from=&date_to=&page=1&limit=100
 // Filters (including nickname) are applied in SQL, so pagination counts the
 // *filtered* set — the old version fetched 500 newest rows and only then
@@ -289,7 +297,7 @@ router.get('/users', async (req, res) => {
 
   let q = supabase
     .from('profiles')
-    .select(`id, nickname, email, avatar_url, is_admin, is_banned,
+    .select(`id, nickname, email, avatar_url, is_admin, is_owner, is_banned,
              rating_as_customer, rating_as_executor,
              reviews_count_customer, reviews_count_executor,
              level, reputation, balance, vip_expires_at, created_at`, { count: 'exact' })
@@ -308,20 +316,30 @@ router.get('/users', async (req, res) => {
 
   // Admins see the raw expiry date (unlike public profile views, which only get
   // the is_vip boolean via withIsVip) — they need it to answer "until when?".
-  const users = (data ?? []).map(p => ({
-    ...p,
-    is_vip: !!p.vip_expires_at && new Date(p.vip_expires_at) > new Date(),
-  }));
+  // is_owner is dropped entirely (not just masked to false) for non-owner
+  // callers — a restricted admin must not be able to tell who's an owner.
+  const users = (data ?? []).map(p => {
+    const { is_owner, ...rest } = p;
+    return {
+      ...rest,
+      ...(req.profile.is_owner ? { is_owner } : {}),
+      is_vip: !!p.vip_expires_at && new Date(p.vip_expires_at) > new Date(),
+    };
+  });
 
   res.json({ users, total: count ?? 0, page: pg, limit: lim });
 });
 
-// PATCH /admin/users/:id — ban/unban or grant/revoke admin
+// PATCH /admin/users/:id — ban/unban, or (owners only) grant/revoke admin/owner
 router.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { is_banned, is_admin } = req.body;
+  const { is_banned, is_admin, is_owner } = req.body;
 
-  // Prevent removing the last admin
+  if ((is_admin !== undefined || is_owner !== undefined) && !req.profile.is_owner) {
+    return res.status(403).json({ error: 'Требуются права владельца' });
+  }
+
+  // Prevent removing the last admin / last owner
   if (is_admin === false) {
     const { count } = await supabase
       .from('profiles')
@@ -332,10 +350,21 @@ router.patch('/users/:id', async (req, res) => {
       return res.status(400).json({ error: 'Должен остаться хотя бы один администратор' });
     }
   }
+  if (is_owner === false) {
+    const { count } = await supabase
+      .from('profiles')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_owner', true)
+      .neq('id', id);
+    if ((count ?? 0) === 0) {
+      return res.status(400).json({ error: 'Должен остаться хотя бы один владелец' });
+    }
+  }
 
   const updates = {};
   if (is_banned !== undefined) updates.is_banned = is_banned;
   if (is_admin  !== undefined) updates.is_admin  = is_admin;
+  if (is_owner  !== undefined) updates.is_owner  = is_owner;
 
   if (Object.keys(updates).length === 0)
     return res.status(400).json({ error: 'No fields to update' });
