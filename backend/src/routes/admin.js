@@ -152,9 +152,18 @@ router.post('/disputes/:id/resolve', async (req, res) => {
     });
   }
 
-  // Optional bans
-  if (ban_customer)  await supabase.from('profiles').update({ is_banned: true }).eq('id', order.customer_id);
-  if (ban_executor)  await supabase.from('profiles').update({ is_banned: true }).eq('id', order.executor_id);
+  // Optional bans — same rank check as PATCH /admin/users/:id: a regular
+  // admin can't ban another admin/owner this way either.
+  let bannableIds = new Set([order.customer_id, order.executor_id].filter(Boolean));
+  if (!req.profile.is_owner && bannableIds.size) {
+    const { data: admins } = await supabase
+      .from('profiles').select('id').in('id', [...bannableIds]).eq('is_admin', true);
+    for (const a of admins ?? []) bannableIds.delete(a.id);
+  }
+  if (ban_customer && bannableIds.has(order.customer_id))
+    await supabase.from('profiles').update({ is_banned: true }).eq('id', order.customer_id);
+  if (ban_executor && bannableIds.has(order.executor_id))
+    await supabase.from('profiles').update({ is_banned: true }).eq('id', order.executor_id);
 
   sendTelegram(
     `⚖️ Спор разрешён\nЗаказ: ${order.id}\nРешение: ${normalised === 'pay_executor' ? 'выплатить исполнителю' : 'вернуть заказчику'}`
