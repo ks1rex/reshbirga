@@ -283,8 +283,8 @@ async function run() {
   await setBalance(cust2Id, 5000);
   await setBalance(exec2Id, 500);
 
-  // ── Step 5: Create order — balance deducted immediately (price + 10%) ───────
-  console.log('\nStep 5 — Create order (instant balance deduction, price + 10% commission)');
+  // ── Step 5: Create order — balance deducted immediately (exactly the typed price) ─
+  console.log('\nStep 5 — Create order (instant balance deduction, commission baked into typed price)');
   try {
     const balBefore = await getBalance(custId);
     const r = await api('POST', '/orders', custToken, {
@@ -295,11 +295,11 @@ async function run() {
       orderId = r.body.id;
       const balAfter = await getBalance(custId);
       const deducted = Math.round((balBefore - balAfter) * 100) / 100;
-      // с заказчика списывается цена + 10% комиссии биржи (исполнителю уйдёт 500)
-      if (r.body.status === 'open' && Math.abs(deducted - 550) < 0.01)
-        ok(5, `Order created id=${orderId.slice(0,8)}, status=open, deducted=${deducted} ₽ (= base_amount + 10%)`);
+      // заказчик платит ровно введённые 500 (не 500+10%); исполнителю уйдёт 500/1.1≈454.55
+      if (r.body.status === 'open' && Math.abs(deducted - 500) < 0.01 && Math.abs(r.body.base_amount - 454.55) < 0.01)
+        ok(5, `Order created id=${orderId.slice(0,8)}, status=open, deducted=${deducted} ₽, executor payout=${r.body.base_amount} ₽`);
       else
-        fail(5, 'Order status or deduction wrong', `status=${r.body.status} deducted=${deducted} expected=550`);
+        fail(5, 'Order status or deduction wrong', `status=${r.body.status} deducted=${deducted} payout=${r.body.base_amount} expected deducted=500 payout≈454.55`);
     } else {
       fail(5, 'POST /orders', `status=${r.status} ${JSON.stringify(r.body)}`);
     }
@@ -377,11 +377,11 @@ async function run() {
     if (rc.status === 200 && rc.body.status === 'cancelled') {
       const balAfterCancel = await getBalance(custId);
       const refunded = Math.round((balAfterCancel - balAfterCreate) * 100) / 100;
-      // возвращается всё зарезервированное, включая комиссию: 400 + 10%
-      if (Math.abs(refunded - 440) < 0.01)
+      // возвращается всё зарезервированное — теперь это ровно введённая цена: 400
+      if (Math.abs(refunded - 400) < 0.01)
         ok(9, `Order cancelled, full refund=${refunded} ₽ (= reserved_amount)`);
       else
-        fail(9, 'Refund amount wrong', `refunded=${refunded} expected=440`);
+        fail(9, 'Refund amount wrong', `refunded=${refunded} expected=400`);
     } else {
       fail(9, 'Cancel order', `status=${rc.status} ${JSON.stringify(rc.body)}`);
     }
@@ -408,11 +408,13 @@ async function run() {
         if (rs.status === 200 && rs.body.status === 'in_progress') {
           const balAfterSelect = await getBalance(custId);
           const refundBack = Math.round((balAfterSelect - balAfterCreate) * 100) / 100;
-          // зарезервировано 1100 (1000+10%), итоговое списание 660 (600+10%) → возврат 440
-          if (Math.abs(refundBack - 440) < 0.01)
-            ok(10, `refund_excess=${refundBack} ₽ credited (1100 - 660)`);
+          // зарезервировано 1000 (заказчик платит ровно введённую цену), итоговое списание
+          // за предложенную исполнителем цену 660 (600+10% — заявка использует старую схему
+          // "цена+комиссия сверху", это отдельный сценарий) → возврат 340
+          if (Math.abs(refundBack - 340) < 0.01)
+            ok(10, `refund_excess=${refundBack} ₽ credited (1000 - 660)`);
           else
-            fail(10, 'refund_excess amount', `got=${refundBack} expected=440`);
+            fail(10, 'refund_excess amount', `got=${refundBack} expected=340`);
         } else {
           fail(10, 'Select app', `status=${rs.status} ${JSON.stringify(rs.body)}`);
         }
@@ -445,11 +447,12 @@ async function run() {
           if (rt.status === 200 && rt.body.status === 'in_progress') {
             const balAfterTopup = await getBalance(cust2Id);
             const paid = Math.round((balBeforeTopup - balAfterTopup) * 100) / 100;
-            // зарезервировано 550 (500+10%), нужно 880 (800+10%) → доплата 330
-            if (Math.abs(paid - 330) < 0.01)
-              ok(11, `Topup paid=${paid} ₽ (880 - 550), order → in_progress`);
+            // зарезервировано 500 (заказчик платит ровно введённую цену), нужно 880 (800+10%,
+            // заявка использует схему "цена+комиссия сверху") → доплата 380
+            if (Math.abs(paid - 380) < 0.01)
+              ok(11, `Topup paid=${paid} ₽ (880 - 500), order → in_progress`);
             else
-              fail(11, 'Topup amount', `paid=${paid} expected=330`);
+              fail(11, 'Topup amount', `paid=${paid} expected=380`);
           } else {
             fail(11, 'POST /topup', `status=${rt.status} ${JSON.stringify(rt.body)}`);
           }

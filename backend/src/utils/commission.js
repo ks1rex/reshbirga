@@ -26,11 +26,16 @@ const chargeWithCommission = (price, pct) => round2(price * (1 + pct / 100));
 // цена + комиссия могут не сойтись с суммой списания на копейку.
 const commissionOn = (price, pct) => round2(chargeWithCommission(price, pct) - round2(price));
 
+// Обратная операция: сколько получит исполнитель, если charge — это то, что
+// уже целиком списывается с заказчика (комиссия сидит внутри charge, не сверху).
+const payoutFromCharge = (charge, pct) => round2(charge / (1 + pct / 100));
+
 module.exports = {
   DEFAULT_MARKETPLACE_COMMISSION_PCT,
   marketplaceCommissionPct,
   chargeWithCommission,
   commissionOn,
+  payoutFromCharge,
   round2,
 };
 
@@ -50,6 +55,8 @@ if (require.main === module) {
       assert.strictEqual(round2(price + commissionOn(price, pct)), charge,
         `price=${price} pct=${pct}: цена + комиссия ≠ списание`);
       assert.ok(charge >= round2(price), `price=${price} pct=${pct}: списание меньше цены`);
+      const payout = payoutFromCharge(charge, pct);
+      assert.ok(Math.abs(payout - price) < 0.02, `price=${price} pct=${pct}: payoutFromCharge не обращает chargeWithCommission`);
     }
   }
   console.log('commission.js: ok');

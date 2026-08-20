@@ -14,7 +14,7 @@ const { addReputation, grantAchievement, reviewReputation } = require('../utils/
 const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
-const { marketplaceCommissionPct, chargeWithCommission, round2 } = require('../utils/commission');
+const { marketplaceCommissionPct, chargeWithCommission, payoutFromCharge, round2 } = require('../utils/commission');
 
 const router = Router();
 const upload = makeUploader();
@@ -35,7 +35,7 @@ const AUTO_CONFIRM_HOURS = parseFloat(process.env.AUTO_CONFIRM_HOURS ?? '24');
 
 const ORDER_DETAIL_SELECT = `
   *,
-  customer:profiles!orders_customer_id_fkey(id, nickname, avatar_url, vip_expires_at),
+  customer:profiles!orders_customer_id_fkey(id, nickname, avatar_url, rating_as_customer, reviews_count_customer, vip_expires_at),
   executor:profiles!orders_executor_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at),
   order_attachments(id, file_name, file_size, visibility, created_at)
 `;
@@ -47,7 +47,7 @@ router.get('/', optionalAuth, async (req, res) => {
   const cap = Math.min(100, Math.max(1, parseInt(limit ?? '100', 10)));
   let q = supabase
     .from('orders')
-    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url, rating_as_customer, vip_expires_at)')
+    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url, rating_as_customer, reviews_count_customer, vip_expires_at)')
     .eq('status', 'open')
     .eq('is_hidden', false)
     .order('created_at', { ascending: false })
@@ -130,11 +130,14 @@ router.post('/', auth, isBanned, async (req, res) => {
     return res.status(400).json({ error: `Достигнут лимит активных объявлений (${limit}). Скройте одно из существующих или купите VIP.`, code: 'LISTING_LIMIT_REACHED' });
   }
 
-  // Комиссия биржи: цена в объявлении — это то, что получит исполнитель,
-  // с заказчика списывается цена + 10% (admin_settings.marketplace_commission_pct).
+  // Комиссия биржи в заказах (в отличие от услуг): заказчик вводит именно ту
+  // сумму, которая целиком спишется с баланса — комиссия уже сидит внутри неё,
+  // а не добавляется сверху. Исполнителю показывается/начисляется цена за
+  // вычетом комиссии (admin_settings.marketplace_commission_pct).
   const pct        = await marketplaceCommissionPct();
-  const reserved   = chargeWithCommission(amount, pct);
-  const commission = round2(reserved - round2(amount));
+  const reserved   = round2(amount);
+  const payout     = payoutFromCharge(reserved, pct);
+  const commission = round2(reserved - payout);
 
   // Check balance and deduct atomically
   const { data: profile } = await supabase.from('profiles').select('balance').eq('id', req.userId).single();
@@ -152,7 +155,7 @@ router.post('/', auth, isBanned, async (req, res) => {
     .from('orders')
     .insert({
       customer_id: req.userId, title, description, subject, order_type: 'order',
-      base_amount: amount, commission_amount: commission, reserved_amount: reserved,
+      base_amount: payout, commission_amount: commission, reserved_amount: reserved,
       final_amount: null, deposit_amount: 0,
       requires_contact_exchange: !!requires_contact_exchange,
       contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
@@ -172,6 +175,74 @@ router.post('/', auth, isBanned, async (req, res) => {
   });
 
   res.status(201).json(order);
+});
+
+// ── EDIT (customer edits own order, only while open and unassigned) ──────────
+
+router.patch('/:id', auth, isBanned, async (req, res) => {
+  const { title, description, subject, base_amount, requires_contact_exchange, contact_exchange_reason, category } = req.body;
+
+  const { data: order } = await supabase.from('orders').select('*').eq('id', req.params.id).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.customer_id !== req.userId) return res.status(403).json({ error: 'Forbidden' });
+  if (order.status !== 'open' || order.executor_id) return res.status(400).json({ error: 'Редактировать можно только открытый заказ без исполнителя' });
+
+  if (requires_contact_exchange && !contact_exchange_reason?.trim())
+    return res.status(400).json({ error: 'Укажите, для чего нужен обмен контактами' });
+  if (!title || !description || !subject || base_amount == null)
+    return res.status(400).json({ error: 'Missing required fields' });
+  if (String(title).length > 200 || String(subject).length > 100 || String(description).length > 5000)
+    return res.status(400).json({ error: 'Превышена допустимая длина полей' });
+  const amount = parseFloat(base_amount);
+  if (isNaN(amount) || amount <= 0) return res.status(400).json({ error: 'base_amount must be positive' });
+  if (amount > 1000000) return res.status(400).json({ error: 'Сумма заказа слишком большая' });
+
+  const pct        = await marketplaceCommissionPct();
+  const reserved   = round2(amount);
+  const payout     = payoutFromCharge(reserved, pct);
+  const commission = round2(reserved - payout);
+  const prevReserved = round2(parseFloat(order.reserved_amount));
+  const diff = round2(reserved - prevReserved);
+
+  // Цена меняется — доводим резерв на балансе до новой суммы (доплата/возврат),
+  // тем же способом, что и при создании заказа.
+  if (diff > 0) {
+    const { data: profile } = await supabase.from('profiles').select('balance').eq('id', req.userId).single();
+    if (parseFloat(profile?.balance ?? 0) < diff) {
+      return res.status(400).json({ error: 'insufficient_balance', required: diff, balance: parseFloat(profile?.balance ?? 0) });
+    }
+    const { data: deducted } = await supabase.rpc('try_subtract_wallet_balance', { p_user_id: req.userId, p_amount: diff });
+    if (!deducted) return res.status(400).json({ error: 'insufficient_balance', required: diff });
+  } else if (diff < 0) {
+    await supabase.rpc('add_wallet_balance', { p_user_id: req.userId, p_amount: -diff });
+  }
+
+  const { data: updated, error } = await supabase
+    .from('orders')
+    .update({
+      title, description, subject, category: category || null,
+      base_amount: payout, commission_amount: commission, reserved_amount: reserved,
+      requires_contact_exchange: !!requires_contact_exchange,
+      contact_exchange_reason: requires_contact_exchange ? String(contact_exchange_reason).trim() : null,
+    })
+    .eq('id', req.params.id).eq('status', 'open').select().single();
+
+  if (error) {
+    // Откатываем изменение резерва, если апдейт не прошёл
+    if (diff > 0) await supabase.rpc('add_wallet_balance', { p_user_id: req.userId, p_amount: diff });
+    else if (diff < 0) await supabase.rpc('try_subtract_wallet_balance', { p_user_id: req.userId, p_amount: -diff });
+    return serverError(res, error);
+  }
+  if (!updated) return res.status(409).json({ error: 'Заказ уже не открыт' });
+
+  if (diff !== 0) {
+    await supabase.from('transactions').insert({
+      user_id: req.userId, order_id: order.id,
+      type: diff > 0 ? 'order_payment' : 'order_refund_excess', amount: Math.abs(diff), status: 'completed',
+    });
+  }
+
+  res.json(updated);
 });
 
 // ── VISIBILITY (owner hides/shows own listing-style open order) ──────────────
