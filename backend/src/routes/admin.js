@@ -339,6 +339,15 @@ router.patch('/users/:id', async (req, res) => {
     return res.status(403).json({ error: 'Требуются права владельца' });
   }
 
+  // Rank-and-file admins may only ban/unban ordinary users — not other
+  // admins, not owners. Owners can ban anyone.
+  if (is_banned !== undefined && !req.profile.is_owner) {
+    const { data: target } = await supabase.from('profiles').select('is_admin').eq('id', id).single();
+    if (target?.is_admin) {
+      return res.status(403).json({ error: 'Нельзя заблокировать администратора' });
+    }
+  }
+
   // Prevent removing the last admin / last owner
   if (is_admin === false) {
     const { count } = await supabase
