@@ -1,6 +1,6 @@
 # API Endpoints
 
-No `/api` prefix — all routers are mounted directly on root in `backend/src/app.js`. Auth is a Supabase JWT verified by `backend/src/middleware/auth.js` (`auth` = required, `optionalAuth` = attaches user if present); `isBanned` blocks banned users; `requireAdmin`/admin routes require `profiles.is_admin = true`.
+No `/api` prefix — all routers are mounted directly on root in `backend/src/app.js`. Auth is a Supabase JWT verified by `backend/src/middleware/auth.js` (`auth` = required, `optionalAuth` = attaches user if present); `isBanned` blocks banned users; `requireAdmin`/admin routes require `profiles.is_admin = true`. Since `20260820120000`, a subset of `/admin/*` additionally requires `profiles.is_owner = true` (`adminMiddleware.requireOwner`) — see the `/admin` section below for exactly which paths.
 
 `GET /health` → `{ "status": "ok" }`.
 
@@ -28,7 +28,9 @@ Buyer-facing responses (`GET /`, `GET /:id`, and `GET /profile/:id/services`) ca
 `GET /:id/messages` · `POST /:id/messages` (multipart, up to 5 files) · `GET /:id/messages/:msgId/attachments/:attId/download`
 
 ## `/profile` (`routes/profile.js`)
-`GET /leaderboard` · `GET /:id/public` · `GET /:id/reviews` · `GET /:id/services` · `GET /` (own profile) · `PUT /` (update own profile)
+`GET /leaderboard` · `GET /:id/public` · `GET /:id/reviews` · `GET /:id/services` · `GET /` (own profile) · `PUT /` (update own profile) · `POST /view-as-admin`
+
+`POST /view-as-admin` is the self-service "Смотреть как админ" toggle: flips the caller's own `is_owner` (not a UI-only flag — owner-only `/admin/*` routes genuinely 403 while toggled). No target state accepted from the client — always re-derives from the fresh DB row: `is_owner = true` → flips to `false`; `is_owner = false && is_owner_was = true` → restores to `true`; otherwise 403. `is_owner_was` itself is untouched by this route — only `PATCH /admin/users/:id` sets/clears it.
 
 ## `/users` (`routes/users.js`)
 `GET /:id` · `GET /:id/reviews`
@@ -64,20 +66,22 @@ GoTrue has no backup-code concept, so a code cannot mint an aal2 session — it 
 ## `/admin` (`routes/admin.js`) — all require admin
 Admin routes additionally require **aal2** (a verified second factor) when the calling admin has a verified MFA factor — otherwise they 403 with `{ code: 'MFA_REQUIRED' }`. Admins without MFA enrolled are unaffected. See `middleware/admin.js`.
 
+**Owner-only subset (since `20260820120000`, `adminMiddleware.requireOwner`, 403 `{ error: 'Требуются права владельца' }` for a rank-and-file admin):** `/ledger`, `/stats`, `/deposits*`, `/withdrawals*`, `/settings*`, `/admin-settings*`, `/finance*`, `/vip*`, `/schedule-warmup*`. Everything else below (disputes/forum/orders/chat/moderation/support/users) is open to any admin.
+
 Ledger/finance: `GET /ledger` · `GET /finance/summary` · `PATCH /finance/expenses`
-Disputes: `GET /disputes` · `POST /disputes/:id/resolve`
+Disputes: `GET /disputes` · `POST /disputes/:id/resolve` — `ban_customer`/`ban_executor` checkboxes go through the same rank check as `PATCH /users/:id` below (silently skip the ban, still resolve the dispute, if the caller isn't an owner and the target is an admin)
 Deposits/withdrawals: `GET /deposits` · `POST /deposits/:id/confirm` · `POST /deposits/:id/reject` · `GET /withdrawals` · `POST /withdrawals/:id/confirm` · `POST /withdrawals/:id/reject`
-Users: `GET /users` · `PATCH /users/:id`
+Users: `GET /users` (omits `is_owner` per-row entirely for a non-owner caller — not `false`, the field is absent) · `PATCH /users/:id` (`is_banned` for anyone if the target isn't an admin; `is_banned` on an admin/owner target, or `is_admin`/`is_owner` at all, requires the caller to be an owner)
 Orders/conversations: `GET /orders` · `GET /conversations` · `GET /contact-exchange-orders`
 Support: `PATCH /support/tickets/:id/close`
 Chat moderation: `GET /chat-moderation` · `PATCH /chat-moderation/:msgId/review`
-Site settings: `PUT /settings/:key` · `PUT /admin-settings/:key` · `GET /settings`
+Site settings (owner-only): `PUT /settings/:key` · `PUT /admin-settings/:key` · `GET /settings`
 Forum moderation: `GET /forum/flagged` · `POST /forum/posts/:id/approve` · `DELETE /forum/posts/:id` · `GET /forum/reports` · `POST /forum/reports/:id/resolve` · `GET /forum/categories` · `POST /forum/categories` · `PATCH /forum/categories/:id` · `DELETE /forum/categories/:id`
-Stats: `GET /stats`
-VIP: `GET /vip` — plans + per-level discount table (computed with the same `utils/vip.js` helpers the purchase uses, so it reflects `admin_settings.vip_level_discounts`), revenue, purchase count, active/expiring counts, and the list of active subscribers · `POST /vip/:userId/extend` (`{ days }`, 1–3650) · `POST /vip/:userId/cancel`
+Stats (owner-only): `GET /stats`
+VIP (owner-only): `GET /vip` — plans + per-level discount table (computed with the same `utils/vip.js` helpers the purchase uses, so it reflects `admin_settings.vip_level_discounts`), revenue, purchase count, active/expiring counts, and the list of active subscribers · `POST /vip/:userId/extend` (`{ days }`, 1–3650) · `POST /vip/:userId/cancel`
 
 `extend`/`cancel` deliberately write **no** `transactions` row: a manual grant isn't a purchase, and logging it would inflate VIP revenue in `/finance/summary`. The audit trail is the Telegram notification (same channel as deposit confirmations and dispute resolutions). `cancel` sets `vip_expires_at = now()` rather than `null` — `utils/vipExpiry.js` looks for a non-null past date, so `null` would leave the user permanently outside the listing-limit sweep — and then calls `hideExcessForUser()` directly so over-limit listings hide immediately instead of waiting up to an hour.
-Schedule warmup: `GET /schedule-warmup/status` · `POST /schedule-warmup/start` (`{ force? }`) · `POST /schedule-warmup/solve-captcha` · `POST /schedule-warmup/cancel` · `POST /schedule-warmup/reset`
+Schedule warmup (owner-only): `GET /schedule-warmup/status` · `POST /schedule-warmup/start` (`{ force? }`) · `POST /schedule-warmup/solve-captcha` · `POST /schedule-warmup/cancel` · `POST /schedule-warmup/reset`
 
 ### Paginated admin responses
 `GET /ledger` and `GET /users` are **paginated envelopes**, not bare arrays:

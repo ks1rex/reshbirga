@@ -26,7 +26,7 @@ Exact columns/constraints live in the migration files; this is a table-of-conten
 ## Core tables
 | Table | Added in | Notes |
 |---|---|---|
-| `profiles` | 0002 | user profile; `is_admin` flag (grant manually via SQL); wallet balance columns added in 0016/0018/0024/0025 (referral, levels) |
+| `profiles` | 0002 | user profile; `is_admin` flag (grant manually via SQL); wallet balance columns added in 0016/0018/0024/0025 (referral, levels); `is_owner`/`is_owner_was` added `20260820120000`/`20260820130000` — see CLAUDE.md "Two admin tiers" |
 | `orders` | 0003 | order/service lifecycle; `completed_at` (0015), `category` (0025); `scheduled_at` dropped in 0019 |
 | `order_applications` | 0004 | executor applications to an order |
 | `order_attachments` | 0005 | file attachments, `attachment_visibility` gated |

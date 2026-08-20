@@ -15,7 +15,7 @@ Repo is in Russian (UI text, commit-adjacent docs, error messages). Match that w
 - Backend: Node.js 20 + Express, deployed to Render as Docker
 - DB/Auth/Storage: Supabase (Postgres + RLS + S3 storage) — schema details in `@docs/schema.md`
 - AI moderation: DeepSeek API (`deepseek-chat`)
-- Notifications: Telegram Bot API, called synchronously from Express (`backend/src/utils/telegramNotify.js`) — an earlier Supabase Edge Function path (`notify-admin-events`) was dead code and removed (2026-07-16), see `docs/schema.md`. Current senders: `routes/admin.js` (deposit confirmed, referral bonus, dispute resolved), `routes/orders.js` (new dispute), `routes/wallet.js` (deposit/withdrawal requests), `routes/support.js` (new support ticket), `routes/conversations.js` (regex contact-info flag in a chat), `utils/aiChatCheck.js` (AI chat flags, one digest per order), `utils/forumModerator.js` (forum AI flags), `jobs/scheduleWarmup.js` (autostart needs captcha / stuck run reset), `routes/mfa.js` (2FA removed via backup code, and failed attempts)
+- Notifications: Telegram Bot API, called synchronously from Express (`backend/src/utils/telegramNotify.js`) — an earlier Supabase Edge Function path (`notify-admin-events`) was dead code and removed (2026-07-16), see `docs/schema.md`. Current senders: `routes/admin.js` (deposit confirmed, referral bonus, dispute resolved), `routes/orders.js` (new dispute), `routes/wallet.js` (deposit/withdrawal requests), `routes/support.js` (new support ticket), `routes/conversations.js` (regex contact-info flag in a chat — currently dormant, see Stack note above), `utils/aiChatCheck.js` (AI chat flags, one digest per order), `utils/forumModerator.js` (forum AI flags), `jobs/scheduleWarmup.js` (autostart needs captcha / stuck run reset), `routes/mfa.js` (2FA removed via backup code, and failed attempts)
 - `frontend/` in this repo is **deprecated and unused**. The real, active UI lives in the separate `ebu.gubkin` repository.
 
 ## Commands
@@ -64,7 +64,7 @@ Backend ships as a Docker image (`backend/Dockerfile`) to Render; env vars are s
 
 **No `/api` prefix.** All backend routes are mounted directly on root (`/orders`, `/wallet`, `/profile/:id/public`, etc.) — see `backend/src/app.js` for the full mount list. There is no separate "market" router; `orders` and `listings` are the real tables.
 
-**Route → middleware → Supabase.** Routes in `backend/src/routes/*.js` are thin: auth via `backend/src/middleware/auth.js` (verifies Supabase JWT), ban check via `isBanned.js`, admin check via `admin.js`, then direct calls through `backend/src/supabase_client.js` (service-role client, bypasses RLS — so routes are the actual authorization boundary, not the DB). Shared logic lives in `backend/src/utils/`: `contactDetector.js` (regex contact-info detection), `aiChatCheck.js` (DeepSeek moderation call), `autoConfirm.js` (auto-confirms orders after `AUTO_CONFIRM_HOURS`), `reputation.js`, `forumModerator.js`, `search.js`, `telegramNotify.js`.
+**Route → middleware → Supabase.** Routes in `backend/src/routes/*.js` are thin: auth via `backend/src/middleware/auth.js` (verifies Supabase JWT), ban check via `isBanned.js`, admin check via `admin.js`, then direct calls through `backend/src/supabase_client.js` (service-role client, bypasses RLS — so routes are the actual authorization boundary, not the DB). Shared logic lives in `backend/src/utils/`: `contactDetector.js` (regex contact-info detection — the call to it in `routes/conversations.js` is currently disabled by product decision, `hasContactInfo` hardcoded `false`; see comment there for how to re-enable), `aiChatCheck.js` (DeepSeek moderation call), `autoConfirm.js` (auto-confirms orders after `AUTO_CONFIRM_HOURS`), `reputation.js`, `forumModerator.js`, `search.js`, `telegramNotify.js`.
 
 **Background jobs run in-process.** All kicked off directly in `app.js` — no external scheduler/queue: `startForumAIJob()` (forum AI moderation, every 10 min), `startVipExpiryJob()` (VIP expiry sweep, hourly), `startWarmupScheduleJob()` (every 15 min; a no-op unless `admin_settings.warmup_auto_hours > 0`). The warmup job doubles as the watchdog that clears a `schedule_warmup_state.status = 'running'` row whose progress has stopped moving — the cancel flag lives in-process, so a redeploy mid-run would otherwise wedge the state forever (there's also a manual `POST /admin/schedule-warmup/reset`).
 
@@ -78,6 +78,44 @@ Backend ships as a Docker image (`backend/Dockerfile`) to Render; env vars are s
 **Money paths are not atomic where you'd expect.** `addReputation` in `backend/src/utils/reputation.js` is read-then-update, not a DB transaction — acceptable for reputation points but flagged there with a `ponytail:` comment as unsafe for anything money-related. Actual escrow/wallet balance changes go through Supabase RPCs/triggers instead — check `@docs/schema.md` for the existing atomic RPC before adding new balance-mutating code in Express.
 
 **Admin panel** (in the `ebu.gubkin` UI) requires `profiles.is_admin = true`; first admin must be granted manually via SQL (`UPDATE profiles SET is_admin = true WHERE id = '<uuid>'`).
+
+**Two admin tiers since 2026-08-20: owner (`is_owner`) vs rank-and-file admin.**
+`is_admin` is still the base gate (`middleware/admin.js`, unchanged — 2FA check
+included); `is_owner` is a second, narrower flag checked by a new
+`adminMiddleware.requireOwner` export, applied as `router.use([...paths],
+requireOwner)` in `routes/admin.js` to the path-prefix groups a rank-and-file
+admin must **not** reach: `/ledger`, `/stats`, `/deposits`, `/withdrawals`,
+`/settings`, `/admin-settings`, `/finance`, `/vip`, `/schedule-warmup`.
+Disputes/forum/orders/chat/moderation/support/users and `mfa.js` (own-account
+2FA) stay open to any admin. `ebu.gubkin` mirrors this in the UI (nav
+filtering, `AdminRoute` path allowlist) — the backend 403 is the real
+boundary, the UI hiding is cosmetic on top of it.
+
+- **`GET /admin/users`** omits `is_owner` from the response entirely (not
+  `false`) when the caller isn't an owner — a rank-and-file admin can't
+  distinguish an owner from another admin even by inspecting the API response.
+- **`PATCH /admin/users/:id`** requires `is_owner` on the caller to touch
+  `is_admin`/`is_owner` on anyone; also now rejects `is_banned` from a
+  non-owner caller when the *target* is any kind of admin (`is_admin = true`)
+  — a rank-and-file admin can only ban ordinary users, owners can ban anyone.
+  The same rank check was retrofitted into `POST /admin/disputes/:id/resolve`'s
+  `ban_customer`/`ban_executor` checkboxes, a separate code path that wrote
+  `is_banned` directly and originally bypassed the `PATCH` guard.
+- **`is_owner_was`** is a *permanent* "was ever granted owner" marker, distinct
+  from the live `is_owner` flag — set alongside a real `is_owner = true` grant,
+  cleared only by an explicit revoke (`is_owner = false` or `is_admin = false`
+  via the `PATCH` route above) or direct DB access. It powers the owner's
+  self-service "Смотреть как админ" toggle: **`POST /profile/view-as-admin`**
+  (in `routes/profile.js`, own-account only) really flips the caller's own
+  `is_owner` — this is not a UI-only simulation, owner-only routes genuinely
+  403 while toggled — but never touches `is_owner_was`, so the owner can
+  always restore themselves even if a step in the flow fails partway. The
+  endpoint never trusts a client-supplied target state; it always re-derives
+  from the freshly read DB row.
+- Migrations: `20260820120000_add_owner_role.sql` (adds `is_owner`),
+  `20260820130000_add_owner_was.sql` (adds `is_owner_was`, backfills existing
+  owners). Neither touches RLS/`is_admin()` — both flags are checked only in
+  Express, same as `is_admin` always was.
 
 **Admin 2FA is per-admin and enforced server-side.** `middleware/auth.js` decodes the `aal` claim off the (already GoTrue-verified) JWT into `req.authAal`; `middleware/admin.js` rejects `aal1` with `{ code: 'MFA_REQUIRED' }` **only** for admins who have a verified factor (`req.user.factors`). This matters because Supabase issues a fully working `aal1` session on password alone even for MFA-enrolled accounts — without the server-side check, 2FA would be decorative. Gating only enrolled admins is deliberate: otherwise the first admin to turn MFA on locks out everyone else. Enrollment UI is Supabase's native TOTP MFA (`supabase.auth.mfa.*`) in `ebu.gubkin`'s `src/pages/Admin/TwoFactor.tsx`; the login/session challenge lives in `src/pages/Login.tsx` and `src/components/AdminRoute.tsx`. No custom secret storage, no QR library.
 
@@ -104,7 +142,7 @@ Several gamification/achievement thresholds and legacy endpoint names don't map 
 - `docs/AUDIT_MIGRATION_DRIFT_2026.md` — full list and description of the 24 real timestamp migrations, how the collision happened, and what each one actually does (includes the full source of `claim_referral_bonus_slot`, the RPC referenced in the security audit).
 - `docs/AUDIT_MIGRATION_SAFETY_2026.md` — file-by-file safety classification of all 26 local files (`0011`–`0036`) against the real live schema: which are harmless no-ops if ever run, which fail loudly (annoying but safe), and which — `0018_balance_refactor.sql` and especially `0019_simplify_order_type.sql` — would either error out or (worse, `0019`) silently apply a real, unintended, hard-to-reverse schema change because the live schema doesn't match what the file assumes.
 
-**Going forward: new migrations must use a timestamp-based version (`YYYYMMDDHHMMSS_description.sql`), not the next sequential number.** This sidesteps the exact collision that caused all of this — sequential numbering only works if exactly one thing in the world is allowed to push to the project, and that stopped being true here. Six migrations have been written under this convention so far — `20260716120000_schedule_warmup_state_rls.sql`, `20260716140000_drop_webhook_secrets.sql`, `20260716160000_confirm_deposit_request_and_rpc_lockdown.sql`, `20260726120000_admin_mfa_backup_codes.sql`, `20260731120000_split_balances_and_marketplace_commission.sql`, `20260801120000_create_order_attachments_bucket.sql` — follow their naming pattern. All of them are **applied live** via `supabase db query --linked -f <file>`, never `db push`. The last one wraps itself in `BEGIN`/`COMMIT` — do the same for anything money-moving, so a failure halfway can't leave balances half-migrated.
+**Going forward: new migrations must use a timestamp-based version (`YYYYMMDDHHMMSS_description.sql`), not the next sequential number.** This sidesteps the exact collision that caused all of this — sequential numbering only works if exactly one thing in the world is allowed to push to the project, and that stopped being true here. Eight migrations have been written under this convention so far — `20260716120000_schedule_warmup_state_rls.sql`, `20260716140000_drop_webhook_secrets.sql`, `20260716160000_confirm_deposit_request_and_rpc_lockdown.sql`, `20260726120000_admin_mfa_backup_codes.sql`, `20260731120000_split_balances_and_marketplace_commission.sql`, `20260801120000_create_order_attachments_bucket.sql`, `20260820120000_add_owner_role.sql`, `20260820130000_add_owner_was.sql` — follow their naming pattern. All of them are **applied live** via `supabase db query --linked -f <file>`, never `db push`. The last one wraps itself in `BEGIN`/`COMMIT` — do the same for anything money-moving, so a failure halfway can't leave balances half-migrated.
 
 **New rule, non-negotiable: every new money-moving RPC must ship with its `REVOKE EXECUTE ... FROM PUBLIC, anon, authenticated` + `GRANT EXECUTE ... TO service_role` in the *same* migration that creates it.** Postgres grants `EXECUTE` to `PUBLIC` by default on any new function — without an explicit revoke, a financial RPC is callable directly by any authenticated (or anon) user via PostgREST, completely bypassing `admin.js`'s `auth`+`adminMiddleware` gate. This was found live on 9 existing functions on 2026-07-16 (see Security fixes below) — don't reintroduce it.
 
