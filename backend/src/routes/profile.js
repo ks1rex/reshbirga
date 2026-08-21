@@ -10,6 +10,18 @@ const { marketplaceCommissionPct, chargeWithCommission } = require('../utils/com
 const router = Router();
 router.use(auth);
 
+// Nickname doubles as the profile URL slug — url-safe only, and must not
+// look like a UUID (so the id-or-nickname lookup below can't be tricked
+// into resolving someone else's id).
+const NICKNAME_RE = /^[a-zA-Z0-9_-]{3,32}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// GET /profile/:idOrNickname/public and friends accept either a UUID id or
+// a nickname, so a user's chosen nickname works as their profile link.
+function idOrNicknameFilter(query, param) {
+  return UUID_RE.test(param) ? query.eq('id', param) : query.eq('nickname', param);
+}
+
 const PUBLIC_FIELDS = `
   id, nickname, full_name, avatar_url, bio, skills,
   level, reputation, forum_posts_count, deals_count,
@@ -46,19 +58,20 @@ router.get('/leaderboard', async (req, res) => {
   res.json({ users });
 });
 
-// GET /profile/:id/public — public profile card
+// GET /profile/:id/public — public profile card (id or nickname)
 router.get('/:id/public', async (req, res) => {
-  const { data: prof, error } = await supabase.from('profiles').select(PUBLIC_FIELDS).eq('id', req.params.id).single();
+  const { data: prof, error } = await idOrNicknameFilter(supabase.from('profiles').select(PUBLIC_FIELDS), req.params.id).single();
   if (error || !prof) return res.status(404).json({ error: 'Профиль не найден' });
+  const userId = prof.id;
 
   const [{ data: achievements }, { data: posts }, { data: deals }, { data: threads }] = await Promise.all([
-    supabase.from('achievements').select('type, earned_at').eq('user_id', req.params.id).order('earned_at', { ascending: false }),
+    supabase.from('achievements').select('type, earned_at').eq('user_id', userId).order('earned_at', { ascending: false }),
     supabase.from('forum_posts').select('content, created_at, thread_id, forum_threads(title)')
-      .eq('author_id', req.params.id).order('created_at', { ascending: false }).limit(10),
+      .eq('author_id', userId).order('created_at', { ascending: false }).limit(10),
     supabase.from('orders').select('final_amount, base_amount, completed_at')
-      .eq('executor_id', req.params.id).eq('status', 'completed').order('completed_at', { ascending: false }).limit(10),
+      .eq('executor_id', userId).eq('status', 'completed').order('completed_at', { ascending: false }).limit(10),
     supabase.from('forum_threads').select('title, created_at')
-      .eq('author_id', req.params.id).order('created_at', { ascending: false }).limit(10),
+      .eq('author_id', userId).order('created_at', { ascending: false }).limit(10),
   ]);
 
   const recent_activity = [
@@ -79,10 +92,13 @@ router.get('/:id/public', async (req, res) => {
 
 // GET /profile/:id/reviews
 router.get('/:id/reviews', async (req, res) => {
+  const { data: target, error: targetErr } = await idOrNicknameFilter(supabase.from('profiles').select('id'), req.params.id).single();
+  if (targetErr || !target) return res.status(404).json({ error: 'Профиль не найден' });
+
   const { data: reviews, error } = await supabase
     .from('reviews')
     .select('rating, comment, created_at, reviewer:profiles!reviews_reviewer_id_fkey(id, nickname, avatar_url)')
-    .eq('reviewee_id', req.params.id)
+    .eq('reviewee_id', target.id)
     .order('created_at', { ascending: false })
     .limit(50);
   if (error) return serverError(res, error);
@@ -96,10 +112,13 @@ router.get('/:id/reviews', async (req, res) => {
 
 // GET /profile/:id/services — active listings owned by this user
 router.get('/:id/services', async (req, res) => {
+  const { data: target, error: targetErr } = await idOrNicknameFilter(supabase.from('profiles').select('id'), req.params.id).single();
+  if (targetErr || !target) return res.status(404).json({ error: 'Профиль не найден' });
+
   const { data, error } = await supabase
     .from('listings')
     .select('id, title, description, price, category, created_at')
-    .eq('owner_id', req.params.id)
+    .eq('owner_id', target.id)
     .eq('is_active', true)
     .order('created_at', { ascending: false });
   if (error) return serverError(res, error);
@@ -179,6 +198,19 @@ router.put('/', isBanned, async (req, res) => {
     }
   }
 
+  if (patch.nickname !== undefined && patch.nickname !== null) {
+    if (!NICKNAME_RE.test(patch.nickname) || UUID_RE.test(patch.nickname)) {
+      return res.status(400).json({ error: 'Никнейм: 3-32 символа, латиница/цифры/-/_' });
+    }
+    const { data: taken } = await supabase
+      .from('profiles')
+      .select('id')
+      .ilike('nickname', patch.nickname.replace(/[%_]/g, '\\$&')) // escape ilike wildcards (nickname can contain _)
+      .neq('id', req.userId)
+      .maybeSingle();
+    if (taken) return res.status(409).json({ error: 'Этот никнейм уже занят' });
+  }
+
   patch.updated_at = new Date().toISOString();
 
   const { data, error } = await supabase
@@ -195,7 +227,11 @@ router.put('/', isBanned, async (req, res) => {
     `)
     .single();
 
-  if (error) return serverError(res, error, 'profile:update');
+  if (error) {
+    // Race with a concurrent update to the same nickname — DB unique index is the real guard.
+    if (error.code === '23505') return res.status(409).json({ error: 'Этот никнейм уже занят' });
+    return serverError(res, error, 'profile:update');
+  }
   res.json(data);
 });
 
