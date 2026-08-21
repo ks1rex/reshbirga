@@ -120,7 +120,7 @@ router.get('/', optionalAuth, async (req, res) => {
   const { search, owner_id, limit, sort } = req.query;
   let q = supabase
     .from('listings')
-    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
+    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, profile_slug, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
     .order('created_at', { ascending: false })
     .limit(Math.min(200, Math.max(1, parseInt(limit ?? '200', 10))));
 
@@ -162,7 +162,7 @@ router.get('/mine', auth, async (req, res) => {
 router.get('/:id', auth, async (req, res) => {
   const { data: listing, error } = await supabase
     .from('listings')
-    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
+    .select(`*, owner:profiles!listings_owner_id_fkey(id, nickname, profile_slug, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
     .eq('id', req.params.id)
     .single();
   if (error || !listing) return res.status(404).json({ error: 'Услуга не найдена' });

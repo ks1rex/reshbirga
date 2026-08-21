@@ -10,20 +10,22 @@ const { marketplaceCommissionPct, chargeWithCommission } = require('../utils/com
 const router = Router();
 router.use(auth);
 
-// Nickname doubles as the profile URL slug — url-safe only, and must not
-// look like a UUID (so the id-or-nickname lookup below can't be tricked
-// into resolving someone else's id).
-const NICKNAME_RE = /^[a-zA-Z0-9_-]{3,32}$/;
+// nickname = free-text display name. profile_slug = url-safe, separately
+// editable profile link (/users/:slug). Both are unique on their own; slug
+// must not look like a UUID (so the id-or-slug lookup below can't be
+// tricked into resolving someone else's id).
+const NICKNAME_RE = /^.{2,32}$/;
+const SLUG_RE = /^[a-zA-Z0-9_-]{3,32}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-// GET /profile/:idOrNickname/public and friends accept either a UUID id or
-// a nickname, so a user's chosen nickname works as their profile link.
-function idOrNicknameFilter(query, param) {
-  return UUID_RE.test(param) ? query.eq('id', param) : query.eq('nickname', param);
+// GET /profile/:idOrSlug/public and friends accept either a UUID id or a
+// profile_slug, so a user's chosen slug works as their profile link.
+function idOrSlugFilter(query, param) {
+  return UUID_RE.test(param) ? query.eq('id', param) : query.eq('profile_slug', param);
 }
 
 const PUBLIC_FIELDS = `
-  id, nickname, full_name, avatar_url, bio, skills,
+  id, nickname, profile_slug, full_name, avatar_url, bio, skills,
   level, reputation, forum_posts_count, deals_count,
   average_rating, reviews_count, created_at, vip_expires_at
 `;
@@ -45,7 +47,7 @@ router.get('/leaderboard', async (req, res) => {
 
   const { data: profiles, error } = await supabase
     .from('profiles')
-    .select('id, nickname, avatar_url, level, reputation, deals_count, is_admin')
+    .select('id, nickname, profile_slug, avatar_url, level, reputation, deals_count, is_admin')
     .in('id', topIds)
     .eq('is_admin', false);
   if (error) return serverError(res, error);
@@ -58,9 +60,9 @@ router.get('/leaderboard', async (req, res) => {
   res.json({ users });
 });
 
-// GET /profile/:id/public — public profile card (id or nickname)
+// GET /profile/:id/public — public profile card (id or profile_slug)
 router.get('/:id/public', async (req, res) => {
-  const { data: prof, error } = await idOrNicknameFilter(supabase.from('profiles').select(PUBLIC_FIELDS), req.params.id).single();
+  const { data: prof, error } = await idOrSlugFilter(supabase.from('profiles').select(PUBLIC_FIELDS), req.params.id).single();
   if (error || !prof) return res.status(404).json({ error: 'Профиль не найден' });
   const userId = prof.id;
 
@@ -92,19 +94,19 @@ router.get('/:id/public', async (req, res) => {
 
 // GET /profile/:id/reviews
 router.get('/:id/reviews', async (req, res) => {
-  const { data: target, error: targetErr } = await idOrNicknameFilter(supabase.from('profiles').select('id'), req.params.id).single();
+  const { data: target, error: targetErr } = await idOrSlugFilter(supabase.from('profiles').select('id'), req.params.id).single();
   if (targetErr || !target) return res.status(404).json({ error: 'Профиль не найден' });
 
   const { data: reviews, error } = await supabase
     .from('reviews')
-    .select('rating, comment, created_at, reviewer:profiles!reviews_reviewer_id_fkey(id, nickname, avatar_url)')
+    .select('rating, comment, created_at, reviewer:profiles!reviews_reviewer_id_fkey(id, nickname, profile_slug, avatar_url)')
     .eq('reviewee_id', target.id)
     .order('created_at', { ascending: false })
     .limit(50);
   if (error) return serverError(res, error);
   res.json({
     reviews: (reviews ?? []).map(r => ({
-      author_id: r.reviewer?.id, author_username: r.reviewer?.nickname, author_avatar: r.reviewer?.avatar_url,
+      author_id: r.reviewer?.id, author_username: r.reviewer?.nickname, author_slug: r.reviewer?.profile_slug, author_avatar: r.reviewer?.avatar_url,
       rating: r.rating, text: r.comment, created_at: r.created_at,
     })),
   });
@@ -112,7 +114,7 @@ router.get('/:id/reviews', async (req, res) => {
 
 // GET /profile/:id/services — active listings owned by this user
 router.get('/:id/services', async (req, res) => {
-  const { data: target, error: targetErr } = await idOrNicknameFilter(supabase.from('profiles').select('id'), req.params.id).single();
+  const { data: target, error: targetErr } = await idOrSlugFilter(supabase.from('profiles').select('id'), req.params.id).single();
   if (targetErr || !target) return res.status(404).json({ error: 'Профиль не найден' });
 
   const { data, error } = await supabase
@@ -142,6 +144,7 @@ const EDITABLE_FIELDS = [
   'university_group',
   'avatar_url',
   'nickname',
+  'profile_slug',
   'bio',
   'skills',
 ];
@@ -151,7 +154,7 @@ router.get('/', async (req, res) => {
   const { data, error } = await supabase
     .from('profiles')
     .select(`
-      id, email, nickname, full_name, avatar_url,
+      id, email, nickname, profile_slug, full_name, avatar_url,
       phone, telegram_username, university_group,
       balance, token_balance, is_admin, has_access,
       referral_code, referral_earnings,
@@ -199,16 +202,29 @@ router.put('/', isBanned, async (req, res) => {
   }
 
   if (patch.nickname !== undefined && patch.nickname !== null) {
-    if (!NICKNAME_RE.test(patch.nickname) || UUID_RE.test(patch.nickname)) {
-      return res.status(400).json({ error: 'Никнейм: 3-32 символа, латиница/цифры/-/_' });
+    if (!NICKNAME_RE.test(patch.nickname)) {
+      return res.status(400).json({ error: 'Имя пользователя: 2-32 символа' });
     }
     const { data: taken } = await supabase
       .from('profiles')
       .select('id')
-      .ilike('nickname', patch.nickname.replace(/[%_]/g, '\\$&')) // escape ilike wildcards (nickname can contain _)
+      .ilike('nickname', patch.nickname.replace(/[%_]/g, '\\$&')) // escape ilike wildcards
       .neq('id', req.userId)
       .maybeSingle();
-    if (taken) return res.status(409).json({ error: 'Этот никнейм уже занят' });
+    if (taken) return res.status(409).json({ error: 'Это имя пользователя уже занято' });
+  }
+
+  if (patch.profile_slug !== undefined && patch.profile_slug !== null) {
+    if (!SLUG_RE.test(patch.profile_slug) || UUID_RE.test(patch.profile_slug)) {
+      return res.status(400).json({ error: 'Ссылка на профиль: 3-32 символа, латиница/цифры/-/_' });
+    }
+    const { data: taken } = await supabase
+      .from('profiles')
+      .select('id')
+      .ilike('profile_slug', patch.profile_slug.replace(/[%_]/g, '\\$&')) // escape ilike wildcards (slug can contain _)
+      .neq('id', req.userId)
+      .maybeSingle();
+    if (taken) return res.status(409).json({ error: 'Эта ссылка уже занята' });
   }
 
   patch.updated_at = new Date().toISOString();
@@ -218,7 +234,7 @@ router.put('/', isBanned, async (req, res) => {
     .update(patch)
     .eq('id', req.userId)
     .select(`
-      id, email, nickname, full_name, avatar_url,
+      id, email, nickname, profile_slug, full_name, avatar_url,
       phone, telegram_username, university_group,
       balance, token_balance, is_admin, has_access,
       referral_code, referral_earnings,
@@ -228,8 +244,12 @@ router.put('/', isBanned, async (req, res) => {
     .single();
 
   if (error) {
-    // Race with a concurrent update to the same nickname — DB unique index is the real guard.
-    if (error.code === '23505') return res.status(409).json({ error: 'Этот никнейм уже занят' });
+    // Race with a concurrent update to the same nickname/slug — DB unique indexes are the real guard.
+    if (error.code === '23505') {
+      const msg = String(error.message ?? '');
+      if (msg.includes('profiles_slug_lower_idx')) return res.status(409).json({ error: 'Эта ссылка уже занята' });
+      return res.status(409).json({ error: 'Это имя пользователя уже занято' });
+    }
     return serverError(res, error, 'profile:update');
   }
   res.json(data);

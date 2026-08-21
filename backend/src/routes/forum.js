@@ -60,7 +60,7 @@ router.get('/categories', async (req, res) => {
     const [{ count }, { data: recent }] = await Promise.all([
       supabase.from('forum_threads').select('id', { count: 'exact', head: true }).eq('category_id', cat.id),
       supabase.from('forum_threads')
-        .select('id, title, last_post_at, last_post_author:profiles!forum_threads_last_post_author_id_fkey(nickname, avatar_url)')
+        .select('id, title, last_post_at, last_post_author:profiles!forum_threads_last_post_author_id_fkey(nickname, profile_slug, avatar_url)')
         .eq('category_id', cat.id)
         .order('last_post_at', { ascending: false, nullsFirst: false })
         .limit(2),
@@ -76,7 +76,7 @@ router.get('/categories', async (req, res) => {
 router.get('/threads', async (req, res) => {
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? '10', 10)));
   const sort  = req.query.sort ?? 'activity';
-  const AUTHOR   = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at)';
+  const AUTHOR   = 'author:profiles!forum_threads_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at)';
   const CATEGORY = 'category:forum_categories(id, name, icon_name)';
 
   // Скрытая категория не должна протекать в «горячие темы» на главной.
@@ -112,8 +112,8 @@ router.get('/categories/:id/threads', async (req, res) => {
   const sort  = req.query.sort ?? 'activity';
   const offset = (page - 1) * PAGE_SIZE;
 
-  const AUTHOR = 'author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at)';
-  const LAST   = 'last_post_author:profiles!forum_threads_last_post_author_id_fkey(id, nickname, avatar_url)';
+  const AUTHOR = 'author:profiles!forum_threads_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at)';
+  const LAST   = 'last_post_author:profiles!forum_threads_last_post_author_id_fkey(id, nickname, profile_slug, avatar_url)';
 
   // Прямая ссылка на скрытую категорию — 404, иначе «скрытие» ничего не скрывает
   const { data: cat } = await supabase
@@ -142,7 +142,7 @@ router.get('/categories/:id/threads', async (req, res) => {
 router.get('/threads/:id', async (req, res) => {
   const { data: thread, error } = await supabase
     .from('forum_threads')
-    .select(`*, author:profiles!forum_threads_author_id_fkey(id, nickname, avatar_url, vip_expires_at), category:forum_categories(id, name, icon_name)`)
+    .select(`*, author:profiles!forum_threads_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at), category:forum_categories(id, name, icon_name)`)
     .eq('id', req.params.id)
     .single();
   if (error || !thread) return res.status(404).json({ error: 'Тема не найдена' });
@@ -218,7 +218,7 @@ router.post('/threads/:id/view', async (req, res) => {
 router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
   const page   = Math.max(1, parseInt(req.query.page ?? '1', 10));
   const offset = (page - 1) * PAGE_SIZE;
-  const AUTHOR = 'author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url, rating_as_executor, level, vip_expires_at)';
+  const AUTHOR = 'author:profiles!forum_posts_author_id_fkey(id, nickname, profile_slug, avatar_url, rating_as_executor, level, vip_expires_at)';
 
   const { data: posts, error } = await supabase
     .from('forum_posts')
@@ -271,7 +271,7 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
       content:           content.trim(),
       moderation_status: process.env.DEEPSEEK_API_KEY ? 'pending_review' : 'approved',
     })
-    .select(`id, content, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, avatar_url, vip_expires_at)`)
+    .select(`id, content, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at)`)
     .single();
 
   if (error) return serverError(res, error, 'forum:reply');

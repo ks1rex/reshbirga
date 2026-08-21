@@ -35,8 +35,8 @@ const AUTO_CONFIRM_HOURS = parseFloat(process.env.AUTO_CONFIRM_HOURS ?? '24');
 
 const ORDER_DETAIL_SELECT = `
   *,
-  customer:profiles!orders_customer_id_fkey(id, nickname, avatar_url, rating_as_customer, reviews_count_customer, vip_expires_at),
-  executor:profiles!orders_executor_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at),
+  customer:profiles!orders_customer_id_fkey(id, nickname, profile_slug, avatar_url, rating_as_customer, reviews_count_customer, vip_expires_at),
+  executor:profiles!orders_executor_id_fkey(id, nickname, profile_slug, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at),
   order_attachments(id, file_name, file_size, visibility, created_at)
 `;
 
@@ -47,7 +47,7 @@ router.get('/', optionalAuth, async (req, res) => {
   const cap = Math.min(100, Math.max(1, parseInt(limit ?? '100', 10)));
   let q = supabase
     .from('orders')
-    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, avatar_url, rating_as_customer, reviews_count_customer, vip_expires_at)')
+    .select('id, title, subject, category, order_type, base_amount, scheduled_at, created_at, customer_id, customer:profiles!orders_customer_id_fkey(nickname, profile_slug, avatar_url, rating_as_customer, reviews_count_customer, vip_expires_at)')
     .eq('status', 'open')
     .eq('is_hidden', false)
     .order('created_at', { ascending: false })
@@ -375,7 +375,7 @@ router.get('/:id/applications', auth, async (req, res) => {
 
   const { data: apps, error } = await supabase
     .from('order_applications')
-    .select(`id, message, proposed_amount, status, created_at, executor:profiles!order_applications_executor_id_fkey(id, nickname, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
+    .select(`id, message, proposed_amount, status, created_at, executor:profiles!order_applications_executor_id_fkey(id, nickname, profile_slug, avatar_url, rating_as_executor, reviews_count_executor, vip_expires_at)`)
     .eq('order_id', req.params.id)
     .order('created_at', { ascending: true });
   if (error) return serverError(res, error);
@@ -652,7 +652,7 @@ router.get('/:id/reviews', auth, async (req, res) => {
 
   const { data: reviews, error } = await supabase
     .from('reviews')
-    .select('id, rating, comment, context, created_at, reviewer_id, reviewer:profiles!reviews_reviewer_id_fkey(id, nickname)')
+    .select('id, rating, comment, context, created_at, reviewer_id, reviewer:profiles!reviews_reviewer_id_fkey(id, nickname, profile_slug)')
     .eq('order_id', orderId);
   if (error) return serverError(res, error);
 
