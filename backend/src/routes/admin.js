@@ -842,6 +842,27 @@ router.post('/conversations/:id/messages', async (req, res) => {
   res.status(201).json(msg);
 });
 
+// GET /admin/conversations/:id/messages/:msgId/attachments/:attId/download
+router.get('/conversations/:id/messages/:msgId/attachments/:attId/download', async (req, res) => {
+  const { id: convId, attId } = req.params;
+
+  const { data: att } = await supabase
+    .from('message_attachments')
+    .select('*, messages!inner(conversation_id)')
+    .eq('id', attId)
+    .single();
+
+  if (!att || att.messages?.conversation_id !== convId)
+    return res.status(404).json({ error: 'Attachment not found' });
+
+  const { data: signed, error: signErr } = await supabase.storage
+    .from('chat-attachments')
+    .createSignedUrl(att.file_path, 300, { download: att.file_name });
+
+  if (signErr) return serverError(res, signErr);
+  res.json({ url: signed.signedUrl, filename: att.file_name });
+});
+
 // ─── Settings ───────────────────────────────────────────────
 
 // PUT /admin/settings/:key  (site_settings — payment requisites etc.)

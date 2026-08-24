@@ -172,7 +172,7 @@ router.get('/:id/messages/:msgId/attachments/:attId/download', auth, async (req,
 
   const { data: signed, error: signErr } = await supabase.storage
     .from('chat-attachments')
-    .createSignedUrl(att.file_path, 300);
+    .createSignedUrl(att.file_path, 300, { download: att.file_name });
 
   if (signErr) return serverError(res, signErr);
   res.json({ url: signed.signedUrl, filename: att.file_name });
