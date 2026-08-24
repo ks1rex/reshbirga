@@ -124,17 +124,18 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
 
   // Upload files to chat-attachments bucket
   const attachments = [];
+  const failedFiles = [];
   for (const file of (req.files ?? [])) {
     const storagePath = `${convId}/${uuidv4()}${path.extname(file.originalname)}`;
     const { error: upErr } = await supabase.storage
       .from('chat-attachments')
       .upload(storagePath, file.buffer, { contentType: file.mimetype });
-    if (upErr) continue;
+    if (upErr) { failedFiles.push(file.originalname); continue; }
 
     const { data: att } = await supabase.from('message_attachments')
       .insert({ message_id: msg.id, file_path: storagePath, file_name: file.originalname, file_size: file.size })
       .select().single();
-    if (att) attachments.push(att);
+    if (att) attachments.push(att); else failedFiles.push(file.originalname);
   }
 
   // Support ticket status update
@@ -150,7 +151,7 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
     }
   }
 
-  res.status(201).json({ ...msg, message_attachments: attachments, contact_warning: contactWarning });
+  res.status(201).json({ ...msg, message_attachments: attachments, contact_warning: contactWarning, failed_files: failedFiles });
 });
 
 // GET /conversations/:id/messages/:msgId/attachments/:attId/download
