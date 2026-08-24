@@ -15,7 +15,7 @@ const router = Router();
 router.use(auth, adminMiddleware);
 
 // Owner-only sections — everything not in the restricted admin's allowed set
-// (споры/форум/заказы/чат/модерация/поддержка/пользователи/2FA-настройки).
+// (споры/форум/заказы/модерация/поддержка/пользователи/2FA-настройки).
 // Path-prefix gate, same pattern as the base auth/adminMiddleware above.
 router.use(
   ['/ledger', '/stats', '/deposits', '/withdrawals', '/settings', '/admin-settings', '/finance', '/vip', '/schedule-warmup'],
@@ -684,7 +684,10 @@ router.get('/orders', async (req, res) => {
 // ─── All conversations (admin overview) ──────────────────────
 
 // GET /admin/conversations?search=&type=&page=1&limit=50
-router.get('/conversations', async (req, res) => {
+// Owner-only: general browsing of every order/support chat. Rank-and-file
+// admins keep chat access scoped to their own work — disputes, and support
+// tickets (whose GET/POST/download sub-routes below stay open to any admin).
+router.get('/conversations', adminMiddleware.requireOwner, async (req, res) => {
   const { search, type, page = 1, limit = 50 } = req.query;
   const pg  = Math.max(1, parseInt(page)  || 1);
   const lim = Math.min(100, Math.max(1, parseInt(limit) || 50));
