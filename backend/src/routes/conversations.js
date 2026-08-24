@@ -11,12 +11,22 @@ const { sendTelegram } = require('../utils/telegramNotify');
 const router = Router();
 const upload = makeUploader();
 
+// Admin write/read access via this router (as opposed to the dedicated
+// /admin/conversations/*) is only meant for support tickets, where the admin
+// is never added as a real conversation_participant — that's their job.
+// Order chats are biржа-only: an admin who happens to also be the customer
+// or executor gets in as that participant, same as anyone else, but a
+// non-participant admin must go through the admin panel, not the market UI.
 async function checkAccess(convId, userId) {
-  const [{ data: participant }, { data: profile }] = await Promise.all([
+  const [{ data: participant }, { data: profile }, { data: conv }] = await Promise.all([
     supabase.from('conversation_participants').select('id').eq('conversation_id', convId).eq('user_id', userId).maybeSingle(),
     supabase.from('profiles').select('is_admin').eq('id', userId).single(),
+    supabase.from('conversations').select('type').eq('id', convId).single(),
   ]);
-  return { isParticipant: participant != null, isAdmin: profile?.is_admin === true };
+  const isParticipant = participant != null;
+  const isAdmin = profile?.is_admin === true;
+  const allowed = isParticipant || (isAdmin && conv?.type === 'support_ticket');
+  return { isParticipant, isAdmin, convType: conv?.type, allowed };
 }
 
 // GET /conversations/:id/messages?before=<timestamp>&limit=<n>
@@ -24,8 +34,8 @@ router.get('/:id/messages', auth, async (req, res) => {
   const { id: convId } = req.params;
   const { before, limit = 100 } = req.query;
 
-  const { isParticipant, isAdmin } = await checkAccess(convId, req.userId);
-  if (!isParticipant && !isAdmin) return res.status(403).json({ error: 'Forbidden' });
+  const { allowed } = await checkAccess(convId, req.userId);
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
   let q = supabase
     .from('messages')
@@ -53,8 +63,8 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   if (!content && !hasFiles) return res.status(400).json({ error: 'content is required' });
   if (content.length > 5000) return res.status(400).json({ error: 'Сообщение слишком длинное' });
 
-  const { isParticipant, isAdmin } = await checkAccess(convId, req.userId);
-  if (!isParticipant && !isAdmin) return res.status(403).json({ error: 'Forbidden' });
+  const { isAdmin, allowed } = await checkAccess(convId, req.userId);
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
   // Get conversation details (type, order_type, support_ticket_id)
   const { data: conv } = await supabase
@@ -70,8 +80,9 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   }
 
   // Order finished (delivered+confirmed or cancelled) — lock sending, history
-  // stays readable. Admins keep write access for post-completion support.
-  if (!isAdmin && ['completed', 'cancelled'].includes(conv?.orders?.status)) {
+  // stays readable. Post-completion support goes through /admin/conversations
+  // instead, which has no such check.
+  if (['completed', 'cancelled'].includes(conv?.orders?.status)) {
     return res.status(403).json({ error: 'Заказ завершён — чат закрыт для новых сообщений', code: 'ORDER_CLOSED_CHAT_LOCKED' });
   }
 
@@ -91,15 +102,9 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   const hasContactInfo = false;
   const contactWarning = false;
 
-  // Admin sending through this endpoint (e.g. the market chat page, not
-  // /admin/conversations) isn't a real participant — tag it so it renders
-  // with the "Администратор" badge instead of looking like an ordinary
-  // customer/executor message.
-  const isAdminIntervention = isAdmin && !isParticipant;
-
   const { data: msg, error: msgErr } = await supabase
     .from('messages')
-    .insert({ conversation_id: convId, sender_id: req.userId, content, is_contact_info: hasContactInfo, is_admin_message: isAdminIntervention })
+    .insert({ conversation_id: convId, sender_id: req.userId, content, is_contact_info: hasContactInfo })
     .select()
     .single();
 
@@ -152,8 +157,8 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
 router.get('/:id/messages/:msgId/attachments/:attId/download', auth, async (req, res) => {
   const { id: convId, attId } = req.params;
 
-  const { isParticipant, isAdmin } = await checkAccess(convId, req.userId);
-  if (!isParticipant && !isAdmin) return res.status(403).json({ error: 'Forbidden' });
+  const { allowed } = await checkAccess(convId, req.userId);
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
   const { data: att } = await supabase
     .from('message_attachments')
