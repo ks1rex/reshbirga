@@ -47,9 +47,10 @@ router.get('/:id/messages', auth, async (req, res) => {
 // POST /conversations/:id/messages
 router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) => {
   const { id: convId } = req.params;
-  const content = req.body.content?.trim();
+  const content = req.body.content?.trim() ?? '';
+  const hasFiles = (req.files?.length ?? 0) > 0;
 
-  if (!content) return res.status(400).json({ error: 'content is required' });
+  if (!content && !hasFiles) return res.status(400).json({ error: 'content is required' });
   if (content.length > 5000) return res.status(400).json({ error: 'Сообщение слишком длинное' });
 
   const { isParticipant, isAdmin } = await checkAccess(convId, req.userId);
