@@ -91,9 +91,15 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   const hasContactInfo = false;
   const contactWarning = false;
 
+  // Admin sending through this endpoint (e.g. the market chat page, not
+  // /admin/conversations) isn't a real participant — tag it so it renders
+  // with the "Администратор" badge instead of looking like an ordinary
+  // customer/executor message.
+  const isAdminIntervention = isAdmin && !isParticipant;
+
   const { data: msg, error: msgErr } = await supabase
     .from('messages')
-    .insert({ conversation_id: convId, sender_id: req.userId, content, is_contact_info: hasContactInfo })
+    .insert({ conversation_id: convId, sender_id: req.userId, content, is_contact_info: hasContactInfo, is_admin_message: isAdminIntervention })
     .select()
     .single();
 
