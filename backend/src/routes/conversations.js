@@ -59,7 +59,7 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   // Get conversation details (type, order_type, support_ticket_id)
   const { data: conv } = await supabase
     .from('conversations')
-    .select('id, type, order_id, support_ticket_id, orders!conversations_order_id_fkey(order_type, requires_contact_exchange, is_hidden, hidden_reason)')
+    .select('id, type, order_id, support_ticket_id, orders!conversations_order_id_fkey(order_type, status, requires_contact_exchange, is_hidden, hidden_reason)')
     .eq('id', convId)
     .single();
 
@@ -67,6 +67,12 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   // (reading history is unaffected, GET /:id/messages above has no such check).
   if (conv?.orders?.is_hidden && conv.orders.hidden_reason === 'vip_expired') {
     return res.status(403).json({ error: 'Чат заблокирован до продления VIP', code: 'VIP_EXPIRED_CHAT_LOCKED' });
+  }
+
+  // Order finished (delivered+confirmed or cancelled) — lock sending, history
+  // stays readable. Admins keep write access for post-completion support.
+  if (!isAdmin && ['completed', 'cancelled'].includes(conv?.orders?.status)) {
+    return res.status(403).json({ error: 'Заказ завершён — чат закрыт для новых сообщений', code: 'ORDER_CLOSED_CHAT_LOCKED' });
   }
 
   // Blocked users can still message in support chats but not in order chats
