@@ -327,11 +327,14 @@ router.get('/users', async (req, res) => {
   // the is_vip boolean via withIsVip) — they need it to answer "until when?".
   // is_owner is dropped entirely (not just masked to false) for non-owner
   // callers — a restricted admin must not be able to tell who's an owner.
+  // email and balance are dropped the same way for non-owners — a
+  // rank-and-file admin's job (disputes/moderation/support) never needs
+  // either, and both are sensitive personal/financial data.
   const users = (data ?? []).map(p => {
-    const { is_owner, ...rest } = p;
+    const { is_owner, email, balance, ...rest } = p;
     return {
       ...rest,
-      ...(req.profile.is_owner ? { is_owner } : {}),
+      ...(req.profile.is_owner ? { is_owner, email, balance } : {}),
       is_vip: !!p.vip_expires_at && new Date(p.vip_expires_at) > new Date(),
     };
   });
@@ -684,11 +687,14 @@ router.get('/orders', async (req, res) => {
 // ─── All conversations (admin overview) ──────────────────────
 
 // GET /admin/conversations?search=&type=&page=1&limit=50
-// Owner-only: general browsing of every order/support chat. Rank-and-file
-// admins keep chat access scoped to their own work — disputes, and support
-// tickets (whose GET/POST/download sub-routes below stay open to any admin).
-router.get('/conversations', adminMiddleware.requireOwner, async (req, res) => {
-  const { search, type, page = 1, limit = 50 } = req.query;
+// Admin/Support.tsx reuses this same endpoint (type=support_ticket) for its
+// own ticket list, so it can't be gated behind requireOwner outright — that
+// broke support for rank-and-file admins. Instead, a non-owner is pinned to
+// type=support_ticket regardless of what they pass: they keep ticket
+// browsing (their job), but lose free browsing of every order chat.
+router.get('/conversations', async (req, res) => {
+  const { search, page = 1, limit = 50 } = req.query;
+  const type = req.profile.is_owner ? req.query.type : 'support_ticket';
   const pg  = Math.max(1, parseInt(page)  || 1);
   const lim = Math.min(100, Math.max(1, parseInt(limit) || 50));
   const offset = (pg - 1) * lim;
