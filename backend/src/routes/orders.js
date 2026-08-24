@@ -111,6 +111,23 @@ router.get('/applied', auth, async (req, res) => {
   })));
 });
 
+// ── EXECUTOR'S ASSIGNED ORDERS (includes direct service orders, no application row) ──
+
+router.get('/executing', auth, async (req, res) => {
+  const { data: orders, error } = await supabase
+    .from('orders')
+    .select('id, title, subject, order_type, base_amount, final_amount, reserved_amount, status, created_at, completed_at, confirmed_by_customer, confirmed_by_executor, confirmation_deadline, customer_id')
+    .eq('executor_id', req.userId)
+    .order('created_at', { ascending: false });
+  if (error) return serverError(res, error);
+
+  const autoConfirmedIds = new Set();
+  for (const order of (orders ?? [])) {
+    if (await checkAndAutoConfirm(order)) autoConfirmedIds.add(order.id);
+  }
+  res.json((orders ?? []).map(o => autoConfirmedIds.has(o.id) ? { ...o, status: 'completed' } : o));
+});
+
 // ── CREATE ────────────────────────────────────────────────────────────────────
 
 router.post('/', auth, isBanned, async (req, res) => {
