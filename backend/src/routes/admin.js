@@ -194,7 +194,7 @@ router.get('/chat-moderation', async (req, res) => {
   let q = supabase
     .from('messages')
     .select(`
-      id, content, is_contact_info, ai_suspected, moderation_reviewed, created_at,
+      id, content, is_contact_info, ai_suspected, ai_reason, moderation_reviewed, created_at,
       sender:profiles!messages_sender_id_fkey(id, nickname),
       conversations!inner(id, order_id, orders!inner(id, title, order_type))
     `)
