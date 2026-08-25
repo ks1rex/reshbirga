@@ -20,7 +20,7 @@ router.use(auth, adminMiddleware);
 // (споры/форум/заказы/модерация/поддержка/пользователи/2FA-настройки).
 // Path-prefix gate, same pattern as the base auth/adminMiddleware above.
 router.use(
-  ['/ledger', '/stats', '/deposits', '/withdrawals', '/settings', '/admin-settings', '/finance', '/vip', '/schedule-warmup'],
+  ['/ledger', '/stats', '/deposits', '/withdrawals', '/settings', '/admin-settings', '/finance', '/vip', '/schedule-warmup', '/market-categories'],
   adminMiddleware.requireOwner,
 );
 
