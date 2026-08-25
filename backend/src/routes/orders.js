@@ -848,6 +848,22 @@ router.post('/:id/attachments', auth, upload.single('file'), async (req, res) =>
   res.status(201).json(att);
 });
 
+router.delete('/:id/attachments/:attachmentId', auth, async (req, res) => {
+  const { id: orderId, attachmentId } = req.params;
+  const { data: att } = await supabase.from('order_attachments')
+    .select('*, orders(customer_id, executor_id)').eq('id', attachmentId).eq('order_id', orderId).single();
+  if (!att) return res.status(404).json({ error: 'Attachment not found' });
+
+  const { orders: order } = att;
+  if (order.customer_id !== req.userId && att.uploaded_by !== req.userId)
+    return res.status(403).json({ error: 'Forbidden' });
+
+  await supabase.storage.from('order-attachments').remove([att.file_path]);
+  const { error } = await supabase.from('order_attachments').delete().eq('id', attachmentId);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
 router.get('/:id/attachments/:attachmentId/download', auth, async (req, res) => {
   const { id: orderId, attachmentId } = req.params;
   const { data: att } = await supabase.from('order_attachments')
