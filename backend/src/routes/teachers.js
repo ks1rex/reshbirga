@@ -5,9 +5,11 @@ const { serverError } = require('../utils/httpError');
 
 const router = Router();
 
-async function requireAdmin(req, res) {
-  const { data: profile } = await supabase.from('profiles').select('is_admin').eq('id', req.userId).single();
-  if (!profile?.is_admin) { res.status(403).json({ error: 'Admin only' }); return false; }
+// Владельческая фича (см. CLAUDE.md "Два admin-тира"): рядовой админ видит
+// раздел в UI, но управлять списком преподавателей может только владелец.
+async function requireOwner(req, res) {
+  const { data: profile } = await supabase.from('profiles').select('is_admin, is_owner').eq('id', req.userId).single();
+  if (!profile?.is_admin || !profile?.is_owner) { res.status(403).json({ error: 'Требуются права владельца' }); return false; }
   return true;
 }
 
@@ -55,9 +57,9 @@ router.get('/:id', async (req, res) => {
   res.json({ ...withAgg, reviews: reviews ?? [], my_review: myReview });
 });
 
-// POST /teachers — админ
+// POST /teachers — владелец
 router.post('/', auth, async (req, res) => {
-  if (!(await requireAdmin(req, res))) return;
+  if (!(await requireOwner(req, res))) return;
   const { full_name, department, position, photo_url } = req.body;
   if (!full_name?.trim()) return res.status(400).json({ error: 'full_name is required' });
 
@@ -75,9 +77,9 @@ router.post('/', auth, async (req, res) => {
   res.status(201).json(data);
 });
 
-// PATCH /teachers/:id — админ
+// PATCH /teachers/:id — владелец
 router.patch('/:id', auth, async (req, res) => {
-  if (!(await requireAdmin(req, res))) return;
+  if (!(await requireOwner(req, res))) return;
   const { full_name, department, position, photo_url } = req.body;
   const patch = {};
   if (full_name !== undefined) {
@@ -93,9 +95,9 @@ router.patch('/:id', auth, async (req, res) => {
   res.json(data);
 });
 
-// DELETE /teachers/:id — админ
+// DELETE /teachers/:id — владелец
 router.delete('/:id', auth, async (req, res) => {
-  if (!(await requireAdmin(req, res))) return;
+  if (!(await requireOwner(req, res))) return;
   const { error } = await supabase.from('teachers').delete().eq('id', req.params.id);
   if (error) return serverError(res, error);
   res.json({ success: true });
@@ -134,9 +136,9 @@ router.delete('/:id/reviews', auth, async (req, res) => {
   res.json({ success: true });
 });
 
-// DELETE /teachers/reviews/:reviewId — модерация, любой отзыв, только админ
+// DELETE /teachers/reviews/:reviewId — модерация, любой отзыв, только владелец
 router.delete('/reviews/:reviewId', auth, async (req, res) => {
-  if (!(await requireAdmin(req, res))) return;
+  if (!(await requireOwner(req, res))) return;
   const { error } = await supabase.from('teacher_reviews').delete().eq('id', req.params.reviewId);
   if (error) return serverError(res, error);
   res.json({ success: true });

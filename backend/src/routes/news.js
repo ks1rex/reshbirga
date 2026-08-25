@@ -5,6 +5,14 @@ const { serverError } = require('../utils/httpError');
 
 const router = Router();
 
+// Владельческая фича (см. CLAUDE.md "Два admin-тира"): рядовой админ видит
+// новости в UI, но публиковать/редактировать/удалять может только владелец.
+async function requireOwner(req, res) {
+  const { data: profile } = await supabase.from('profiles').select('is_admin, is_owner').eq('id', req.userId).single();
+  if (!profile?.is_admin || !profile?.is_owner) { res.status(403).json({ error: 'Требуются права владельца' }); return false; }
+  return true;
+}
+
 // GET /news — публично, новые сверху
 router.get('/', async (req, res) => {
   const { data, error } = await supabase
@@ -15,10 +23,9 @@ router.get('/', async (req, res) => {
   res.json(data ?? []);
 });
 
-// POST /news — админ
+// POST /news — владелец
 router.post('/', auth, async (req, res) => {
-  const { data: profile } = await supabase.from('profiles').select('is_admin').eq('id', req.userId).single();
-  if (!profile?.is_admin) return res.status(403).json({ error: 'Admin only' });
+  if (!(await requireOwner(req, res))) return;
 
   const { title, content } = req.body;
   if (!title?.trim()) return res.status(400).json({ error: 'title is required' });
@@ -35,10 +42,9 @@ router.post('/', auth, async (req, res) => {
   res.status(201).json(data);
 });
 
-// PATCH /news/:id — админ
+// PATCH /news/:id — владелец
 router.patch('/:id', auth, async (req, res) => {
-  const { data: profile } = await supabase.from('profiles').select('is_admin').eq('id', req.userId).single();
-  if (!profile?.is_admin) return res.status(403).json({ error: 'Admin only' });
+  if (!(await requireOwner(req, res))) return;
 
   const { title, content } = req.body;
   const patch = { updated_at: new Date().toISOString() };
@@ -61,10 +67,9 @@ router.patch('/:id', auth, async (req, res) => {
   res.json(data);
 });
 
-// DELETE /news/:id — админ
+// DELETE /news/:id — владелец
 router.delete('/:id', auth, async (req, res) => {
-  const { data: profile } = await supabase.from('profiles').select('is_admin').eq('id', req.userId).single();
-  if (!profile?.is_admin) return res.status(403).json({ error: 'Admin only' });
+  if (!(await requireOwner(req, res))) return;
 
   const { error } = await supabase.from('news').delete().eq('id', req.params.id);
   if (error) return serverError(res, error);
