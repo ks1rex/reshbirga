@@ -7,6 +7,7 @@ const { serverError } = require('../utils/httpError');
 const { makeUploader } = require('../utils/upload');
 const { withIsVip } = require('../utils/vip');
 const { sendTelegram } = require('../utils/telegramNotify');
+const { notifyUser } = require('../utils/notify');
 
 const router = Router();
 const upload = makeUploader();
@@ -143,6 +144,11 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
     const ticketId = conv.support_ticket_id;
     if (isAdmin) {
       await supabase.from('support_tickets').update({ status: 'answered' }).eq('id', ticketId);
+      const { data: ticket } = await supabase.from('support_tickets').select('user_id, subject').eq('id', ticketId).single();
+      if (ticket?.user_id) {
+        notifyUser(ticket.user_id, 'support_reply', 'Ответ в поддержке',
+          ticket.subject ? `«${ticket.subject}»` : 'Вам ответили в поддержке', `/support/${ticketId}`);
+      }
     } else {
       const { data: ticket } = await supabase.from('support_tickets').select('status').eq('id', ticketId).single();
       if (['answered', 'closed'].includes(ticket?.status)) {

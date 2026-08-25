@@ -7,6 +7,7 @@ const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
 const { marketplaceCommissionPct, chargeWithCommission, round2 } = require('../utils/commission');
+const { notifyUser } = require('../utils/notify');
 
 const router = Router();
 
@@ -329,6 +330,9 @@ router.post('/:id/order', auth, isBanned, async (req, res) => {
       });
     }
   }
+
+  notifyUser(listing.owner_id, 'listing_purchased', 'Вашу услугу заказали',
+    `«${listing.title}» — ${price} ₽`, `/orders/${order.id}`);
 
   res.status(201).json({ ...order, conversation_id: conv?.id ?? null });
 });

@@ -66,19 +66,20 @@ router.get('/:id/public', async (req, res) => {
   if (error || !prof) return res.status(404).json({ error: 'Профиль не найден' });
   const userId = prof.id;
 
-  const [{ data: achievements }, { data: posts }, { data: deals }, { data: threads }] = await Promise.all([
+  // ponytail: заработок по сделкам сюда раньше тоже попадал (type: 'deal',
+  // сумма final_amount) — публичная карточка отдавала точную сумму каждой
+  // сделки любому залогиненному пользователю. Убрано целиком вместе с
+  // вкладкой «Активность» на фронте, а не просто скрыта сумма.
+  const [{ data: achievements }, { data: posts }, { data: threads }] = await Promise.all([
     supabase.from('achievements').select('type, earned_at').eq('user_id', userId).order('earned_at', { ascending: false }),
     supabase.from('forum_posts').select('content, created_at, thread_id, forum_threads(title)')
       .eq('author_id', userId).order('created_at', { ascending: false }).limit(10),
-    supabase.from('orders').select('final_amount, base_amount, completed_at')
-      .eq('executor_id', userId).eq('status', 'completed').order('completed_at', { ascending: false }).limit(10),
     supabase.from('forum_threads').select('title, created_at')
       .eq('author_id', userId).order('created_at', { ascending: false }).limit(10),
   ]);
 
   const recent_activity = [
     ...(posts ?? []).map(p => ({ type: 'post', text: p.content?.slice(0, 200) ?? '', forum_category: p.forum_threads?.title ?? null, ago: p.created_at })),
-    ...(deals ?? []).map(d => ({ type: 'deal', amount: parseFloat(d.final_amount ?? d.base_amount ?? 0), ago: d.completed_at })),
     ...(threads ?? []).map(t => ({ type: 'thread', title: t.title, ago: t.created_at })),
   ].sort((a, b) => new Date(b.ago) - new Date(a.ago)).slice(0, 10);
 

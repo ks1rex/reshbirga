@@ -15,6 +15,7 @@ const { getListingUsage } = require('../utils/listingLimit');
 const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
 const { marketplaceCommissionPct, chargeWithCommission, payoutFromCharge, round2 } = require('../utils/commission');
+const { notifyUser } = require('../utils/notify');
 
 const router = Router();
 const upload = makeUploader();
@@ -356,7 +357,7 @@ router.post('/:id/apply', auth, isBanned, async (req, res) => {
   if (!message?.trim()) return res.status(400).json({ error: 'message is required' });
   if (message.length > 2000) return res.status(400).json({ error: 'Сообщение слишком длинное' });
 
-  const { data: order } = await supabase.from('orders').select('id, customer_id, order_type, status').eq('id', orderId).single();
+  const { data: order } = await supabase.from('orders').select('id, customer_id, order_type, status, title').eq('id', orderId).single();
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'Order is not open' });
   if (order.customer_id === req.userId) return res.status(400).json({ error: 'Cannot apply to own order' });
@@ -378,6 +379,10 @@ router.post('/:id/apply', auth, isBanned, async (req, res) => {
     status: 'pending',
   }).select().single();
   if (error) return serverError(res, error);
+
+  notifyUser(order.customer_id, 'order_application', 'Новый отклик на заказ',
+    `Кто-то откликнулся на ваш заказ${order.title ? ` «${order.title}»` : ''}`, `/orders/${orderId}`);
+
   res.status(201).json(app);
 });
 
@@ -456,6 +461,9 @@ router.post('/:id/applications/:appId/select', auth, isBanned, async (req, res) 
   await supabase.from('order_applications').update({ status: 'accepted' }).eq('id', appId);
   await supabase.from('order_applications').update({ status: 'rejected' }).eq('order_id', orderId).neq('id', appId).eq('status', 'pending');
 
+  notifyUser(app.executor_id, 'order_selected', 'Вас выбрали исполнителем',
+    order.title ? `Заказ «${order.title}»` : 'Вас выбрали исполнителем заказа', `/orders/${orderId}`);
+
   res.json({ status: newStatus, final_amount });
 });
 
@@ -508,7 +516,7 @@ router.post('/:id/topup', auth, isBanned, async (req, res) => {
 router.post('/:id/cancel', auth, isBanned, async (req, res) => {
   const orderId = req.params.id;
   const { data: order } = await supabase.from('orders')
-    .select('id, customer_id, status, reserved_amount, executor_id').eq('id', orderId).single();
+    .select('id, customer_id, status, reserved_amount, executor_id, title').eq('id', orderId).single();
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.customer_id !== req.userId) return res.status(403).json({ error: 'Forbidden' });
 
@@ -542,6 +550,11 @@ router.post('/:id/cancel', auth, isBanned, async (req, res) => {
 
   // Fire-and-forget AI scan (no disputes on plain cancel, so will run)
   runAIChatCheck(orderId).catch(() => {});
+
+  if (isStuckTopup && order.executor_id) {
+    notifyUser(order.executor_id, 'order_cancelled', 'Заказ отменён',
+      order.title ? `Заказчик отменил заказ «${order.title}»` : 'Заказчик отменил заказ', `/orders/${orderId}`);
+  }
 
   res.json({ status: 'cancelled', refunded: refundAmount });
 });
@@ -613,6 +626,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // Fire-and-forget AI chat scan after order completion
     runAIChatCheck(order.id).catch(() => {});
 
+    notifyUser(order.executor_id, 'order_completed', 'Заказ завершён, деньги начислены',
+      `${order.title ? `«${order.title}» — ` : ''}начислено ${payoutAmount} ₽`, `/orders/${order.id}`);
+
     return res.json({ status: 'completed' });
   }
 
@@ -635,7 +651,7 @@ router.post('/:id/dispute', auth, isBanned, async (req, res) => {
   if (!reason?.trim()) return res.status(400).json({ error: 'reason is required' });
   if (reason.length > 2000) return res.status(400).json({ error: 'Слишком длинный текст' });
 
-  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, status').eq('id', req.params.id).single();
+  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, status, title').eq('id', req.params.id).single();
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
   const isParty = order.customer_id === req.userId || order.executor_id === req.userId;
@@ -652,6 +668,10 @@ router.post('/:id/dispute', auth, isBanned, async (req, res) => {
   if (orderErr) return serverError(res, orderErr);
 
   sendTelegram(`⚠️ Новый спор\nЗаказ: ${order.title ?? order.id}\nПричина: ${reason.trim().slice(0, 200)}`);
+
+  const otherParty = order.customer_id === req.userId ? order.executor_id : order.customer_id;
+  notifyUser(otherParty, 'dispute_opened', 'Открыт спор по заказу',
+    order.title ? `«${order.title}»` : 'По одному из ваших заказов открыт спор', `/orders/${order.id}`);
 
   res.json({ status: 'disputed' });
 });
@@ -728,6 +748,9 @@ router.post('/:id/reviews', auth, isBanned, async (req, res) => {
   if (last5?.length === 5 && last5.every(rv => rv.rating === 5)) {
     await grantAchievement(supabase, reviewee_id, 'perfect_score');
   }
+
+  notifyUser(reviewee_id, 'new_review', 'Новый отзыв',
+    `Вам поставили оценку ${r}★${comment?.trim() ? ' с комментарием' : ''}`, `/orders/${orderId}`);
 
   res.status(201).json(review);
 });

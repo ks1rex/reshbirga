@@ -10,6 +10,8 @@ const { withIsVip, vipDiscountPct, applyVipDiscount, parseLevelDiscounts, VIP_LE
 const { fetchAll, sumAll } = require('../utils/pagedFetch');
 const { hideExcessForUser, baseListingLimit } = require('../utils/vipExpiry');
 const scheduleWarmup = require('../jobs/scheduleWarmup');
+const { notifyUser } = require('../utils/notify');
+const { round2 } = require('../utils/commission');
 
 const router = Router();
 router.use(auth, adminMiddleware);
@@ -168,6 +170,14 @@ router.post('/disputes/:id/resolve', async (req, res) => {
   sendTelegram(
     `⚖️ Спор разрешён\nЗаказ: ${order.id}\nРешение: ${normalised === 'pay_executor' ? 'выплатить исполнителю' : 'вернуть заказчику'}`
   );
+
+  const disputeTitle = 'Спор по заказу разрешён';
+  notifyUser(order.customer_id, 'dispute_resolved', disputeTitle,
+    normalised === 'pay_executor' ? 'Администратор принял решение в пользу исполнителя' : 'Деньги возвращены на ваш баланс',
+    `/orders/${order.id}`);
+  notifyUser(order.executor_id, 'dispute_resolved', disputeTitle,
+    normalised === 'pay_executor' ? 'Администратор принял решение в вашу пользу, деньги начислены' : 'Администратор принял решение в пользу заказчика',
+    `/orders/${order.id}`);
 
   res.json({ success: true });
 });
@@ -514,12 +524,21 @@ router.post('/deposits/:id/confirm', async (req, res) => {
     (bonusApplied ? `\n🎁 Реферальный бонус: ${referralBonus} ₽` : '')
   );
 
+  notifyUser(dep.user_id, 'deposit_confirmed', 'Пополнение подтверждено',
+    `Зачислено ${creditedAmount} ₽`, '/wallet');
+  if (bonusApplied && referrerId) {
+    notifyUser(referrerId, 'referral_bonus', 'Реферальный бонус начислен',
+      `+${referralBonus} ₽ за пополнение приглашённого пользователя`, '/wallet');
+  }
+
   res.json({ success: true, credited_amount: creditedAmount, referral_bonus: bonusApplied ? referralBonus : 0 });
 });
 
 // POST /admin/deposits/:id/reject
 router.post('/deposits/:id/reject', async (req, res) => {
   const { admin_comment } = req.body;
+  const { data: dep } = await supabase
+    .from('deposit_requests').select('user_id').eq('id', req.params.id).single();
   const { data: claimed, error } = await supabase
     .from('deposit_requests')
     .update({ status: 'rejected', admin_comment: admin_comment ?? null, processed_by: req.userId, processed_at: new Date().toISOString() })
@@ -529,6 +548,12 @@ router.post('/deposits/:id/reject', async (req, res) => {
   if (error) return serverError(res, error);
   if (!claimed || claimed.length === 0)
     return res.status(409).json({ error: 'Заявка уже обработана' });
+
+  if (dep?.user_id) {
+    notifyUser(dep.user_id, 'deposit_rejected', 'Пополнение отклонено',
+      admin_comment?.trim() || 'Заявка на пополнение отклонена администратором', '/wallet');
+  }
+
   res.json({ success: true });
 });
 
@@ -606,6 +631,9 @@ router.post('/withdrawals/:id/confirm', async (req, res) => {
     platform_profit: platformProfit,
   });
 
+  notifyUser(wr.user_id, 'withdrawal_confirmed', 'Вывод средств выполнен',
+    `Выплачено ${round2(amount * (1 - commissionPct / 100))} ₽`, '/wallet');
+
   res.json({ success: true });
 });
 
@@ -634,6 +662,9 @@ router.post('/withdrawals/:id/reject', async (req, res) => {
   // Refund the reserved balance — обратно в тот же баланс, откуда списали
   await supabase.rpc(wr.source_balance === 'earned' ? 'add_earned_balance' : 'add_wallet_balance',
     { p_user_id: wr.user_id, p_amount: parseFloat(wr.amount) });
+
+  notifyUser(wr.user_id, 'withdrawal_rejected', 'Вывод средств отклонён',
+    admin_comment?.trim() || 'Заявка на вывод отклонена, средства возвращены на баланс', '/wallet');
 
   res.json({ success: true });
 });
