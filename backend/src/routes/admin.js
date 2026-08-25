@@ -174,10 +174,10 @@ router.post('/disputes/:id/resolve', async (req, res) => {
   const disputeTitle = 'Спор по заказу разрешён';
   notifyUser(order.customer_id, 'dispute_resolved', disputeTitle,
     normalised === 'pay_executor' ? 'Администратор принял решение в пользу исполнителя' : 'Деньги возвращены на ваш баланс',
-    `/orders/${order.id}`);
+    `/market/orders/${order.id}`);
   notifyUser(order.executor_id, 'dispute_resolved', disputeTitle,
     normalised === 'pay_executor' ? 'Администратор принял решение в вашу пользу, деньги начислены' : 'Администратор принял решение в пользу заказчика',
-    `/orders/${order.id}`);
+    `/market/orders/${order.id}`);
 
   res.json({ success: true });
 });

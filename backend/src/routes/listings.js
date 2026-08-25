@@ -332,7 +332,7 @@ router.post('/:id/order', auth, isBanned, async (req, res) => {
   }
 
   notifyUser(listing.owner_id, 'listing_purchased', 'Вашу услугу заказали',
-    `«${listing.title}» — ${price} ₽`, `/orders/${order.id}`);
+    `«${listing.title}» — ${price} ₽`, `/market/orders/${order.id}`);
 
   res.status(201).json({ ...order, conversation_id: conv?.id ?? null });
 });

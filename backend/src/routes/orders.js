@@ -381,7 +381,7 @@ router.post('/:id/apply', auth, isBanned, async (req, res) => {
   if (error) return serverError(res, error);
 
   notifyUser(order.customer_id, 'order_application', 'Новый отклик на заказ',
-    `Кто-то откликнулся на ваш заказ${order.title ? ` «${order.title}»` : ''}`, `/orders/${orderId}`);
+    `Кто-то откликнулся на ваш заказ${order.title ? ` «${order.title}»` : ''}`, `/market/orders/${orderId}/applications`);
 
   res.status(201).json(app);
 });
@@ -462,7 +462,7 @@ router.post('/:id/applications/:appId/select', auth, isBanned, async (req, res) 
   await supabase.from('order_applications').update({ status: 'rejected' }).eq('order_id', orderId).neq('id', appId).eq('status', 'pending');
 
   notifyUser(app.executor_id, 'order_selected', 'Вас выбрали исполнителем',
-    order.title ? `Заказ «${order.title}»` : 'Вас выбрали исполнителем заказа', `/orders/${orderId}`);
+    order.title ? `Заказ «${order.title}»` : 'Вас выбрали исполнителем заказа', `/market/orders/${orderId}`);
 
   res.json({ status: newStatus, final_amount });
 });
@@ -553,7 +553,7 @@ router.post('/:id/cancel', auth, isBanned, async (req, res) => {
 
   if (isStuckTopup && order.executor_id) {
     notifyUser(order.executor_id, 'order_cancelled', 'Заказ отменён',
-      order.title ? `Заказчик отменил заказ «${order.title}»` : 'Заказчик отменил заказ', `/orders/${orderId}`);
+      order.title ? `Заказчик отменил заказ «${order.title}»` : 'Заказчик отменил заказ', `/market/orders/${orderId}`);
   }
 
   res.json({ status: 'cancelled', refunded: refundAmount });
@@ -627,7 +627,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     runAIChatCheck(order.id).catch(() => {});
 
     notifyUser(order.executor_id, 'order_completed', 'Заказ завершён, деньги начислены',
-      `${order.title ? `«${order.title}» — ` : ''}начислено ${payoutAmount} ₽`, `/orders/${order.id}`);
+      `${order.title ? `«${order.title}» — ` : ''}начислено ${payoutAmount} ₽`, `/market/orders/${order.id}`);
 
     return res.json({ status: 'completed' });
   }
@@ -671,7 +671,7 @@ router.post('/:id/dispute', auth, isBanned, async (req, res) => {
 
   const otherParty = order.customer_id === req.userId ? order.executor_id : order.customer_id;
   notifyUser(otherParty, 'dispute_opened', 'Открыт спор по заказу',
-    order.title ? `«${order.title}»` : 'По одному из ваших заказов открыт спор', `/orders/${order.id}`);
+    order.title ? `«${order.title}»` : 'По одному из ваших заказов открыт спор', `/market/orders/${order.id}`);
 
   res.json({ status: 'disputed' });
 });
@@ -750,7 +750,7 @@ router.post('/:id/reviews', auth, isBanned, async (req, res) => {
   }
 
   notifyUser(reviewee_id, 'new_review', 'Новый отзыв',
-    `Вам поставили оценку ${r}★${comment?.trim() ? ' с комментарием' : ''}`, `/orders/${orderId}`);
+    `Вам поставили оценку ${r}★${comment?.trim() ? ' с комментарием' : ''}`, `/market/orders/${orderId}`);
 
   res.status(201).json(review);
 });
