@@ -629,6 +629,16 @@ router.post('/:id/confirm', auth, async (req, res) => {
     notifyUser(order.executor_id, 'order_completed', 'Заказ завершён, деньги начислены',
       `${order.title ? `«${order.title}» — ` : ''}начислено ${payoutAmount} ₽`, `/market/orders/${order.id}`);
 
+    // Уведомляем заказчика, только если завершение только что подтвердил
+    // исполнитель (заказчик подтвердил раньше и ещё не знает, что второе
+    // подтверждение уже пришло) — если завершил заказчик сам, ему сообщать
+    // о собственном действии незачем.
+    if (isExecutor) {
+      notifyUser(order.customer_id, 'order_completed', 'Заказ выполнен',
+        order.title ? `Исполнитель отметил заказ «${order.title}» как выполненный` : 'Исполнитель отметил заказ как выполненный',
+        `/market/orders/${order.id}`);
+    }
+
     return res.json({ status: 'completed' });
   }
 
@@ -640,6 +650,16 @@ router.post('/:id/confirm', auth, async (req, res) => {
     confirmation_deadline: deadline,
   }).eq('id', order.id);
   if (orderErr) return serverError(res, orderErr);
+
+  // Исполнитель отметил заказ выполненным — заказчику нужно подтвердить со
+  // своей стороны (иначе завершится автоматически по дедлайну, см.
+  // utils/autoConfirm.js). Обратное (заказчик подтвердил первым) уведомлять
+  // некому: исполнитель это увидит в статусе заказа, не финальное действие.
+  if (isExecutor) {
+    notifyUser(order.customer_id, 'order_completed', 'Заказ выполнен',
+      order.title ? `Исполнитель отметил заказ «${order.title}» как выполненный — подтвердите получение` : 'Исполнитель отметил заказ как выполненный — подтвердите получение',
+      `/market/orders/${order.id}`);
+  }
 
   res.json({ status: 'awaiting_confirmation', confirmation_deadline: deadline });
 });
