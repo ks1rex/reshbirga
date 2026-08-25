@@ -6,10 +6,35 @@ const { moderateSync } = require('../utils/forumModerator');
 const { serverError }  = require('../utils/httpError');
 const { grantAchievement } = require('../utils/reputation');
 const { withIsVip } = require('../utils/vip');
+const { notifyUser } = require('../utils/notify');
 
 const router   = Router();
 const PAGE_SIZE = 20;
 const MAX_ATTACHMENTS = 6; // держим в паре с ebu.gubkin/src/lib/attachments.ts
+
+// Упоминание в посте — фронт вставляет его как "@ник " (см.
+// useForumAttachments / ForumThread.tsx), так что ник — это всё до
+// следующего пробела/@. Ники не ограничены по алфавиту (NICKNAME_RE во
+// фронте — любые 2–32 символа), поэтому ник с пробелом внутри так не
+// поймать — ponytail: приемлемый потолок, полноценный парсинг потребовал
+// бы отдельного разделителя вроде markdown-ссылок.
+function extractMentions(content) {
+  const matches = (content ?? '').match(/@([^\s@]{2,32})/g) ?? [];
+  return [...new Set(matches.map(m => m.slice(1)))];
+}
+
+async function notifyMentions(content, authorId, authorNickname, threadId, threadTitle) {
+  const nicknames = extractMentions(content);
+  if (!nicknames.length) return;
+  const { data: mentioned } = await supabase
+    .from('profiles').select('id, nickname').in('nickname', nicknames);
+  for (const m of (mentioned ?? [])) {
+    if (m.id === authorId) continue;
+    notifyUser(m.id, 'forum_mention', 'Вас упомянули на форуме',
+      `${authorNickname ?? 'Пользователь'} упомянул(а) вас в теме «${threadTitle}»`,
+      `/forum/thread/${threadId}`);
+  }
+}
 
 // ── Optional auth (sets req.userId if token valid, doesn't reject anon) ──────
 async function optionalAuth(req, _res, next) {
@@ -189,6 +214,9 @@ router.post('/threads', auth, isBanned, async (req, res) => {
 
   await bumpForumPostsCount(req.userId);
 
+  const { data: authorProf } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
+  notifyMentions(content, req.userId, authorProf?.nickname, thread.id, title.trim());
+
   res.status(201).json({ thread_id: thread.id });
 });
 
@@ -257,7 +285,7 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
   if ((content ?? '').trim().length > 10000) return res.status(400).json({ error: 'Текст не более 10 000 символов' });
 
   // Check thread exists and is not locked
-  const { data: thread } = await supabase.from('forum_threads').select('id, is_locked').eq('id', req.params.id).single();
+  const { data: thread } = await supabase.from('forum_threads').select('id, title, is_locked').eq('id', req.params.id).single();
   if (!thread) return res.status(404).json({ error: 'Тема не найдена' });
   if (thread.is_locked) return res.status(403).json({ error: 'Тема закрыта для новых ответов' });
 
@@ -282,6 +310,7 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
   if (error) return serverError(res, error, 'forum:reply');
 
   await bumpForumPostsCount(req.userId);
+  notifyMentions(content, req.userId, post.author?.nickname, req.params.id, thread.title);
 
   res.status(201).json({ ...post, author: withIsVip(post.author) });
 });
