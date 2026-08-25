@@ -19,7 +19,8 @@ async function registerTelegramWebhook() {
       signal: AbortSignal.timeout(10000),
     });
     const body = await resp.json().catch(() => ({}));
-    if (!body.ok) console.error('[telegram] setWebhook failed:', JSON.stringify(body));
+    if (body.ok) console.log('[telegram] webhook registered:', `${base.replace(/\/$/, '')}/telegram/webhook`);
+    else console.error('[telegram] setWebhook failed:', JSON.stringify(body));
   } catch (err) {
     console.error('[telegram] setWebhook request failed:', err?.message);
   }
