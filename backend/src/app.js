@@ -19,9 +19,11 @@ const statsRouter          = require('./routes/stats');
 const scheduleRouter       = require('./routes/schedule');
 const mfaRouter            = require('./routes/mfa');
 const notificationsRouter  = require('./routes/notifications');
+const telegramRouter       = require('./routes/telegram');
 const { startForumAIJob }  = require('./utils/forumModerator');
 const { startVipExpiryJob } = require('./utils/vipExpiry');
 const { startWarmupScheduleJob } = require('./jobs/scheduleWarmup');
+const { registerTelegramWebhook } = require('./utils/registerTelegramWebhook');
 
 const app = express();
 
@@ -74,6 +76,7 @@ app.use('/stats',          statsRouter);
 app.use('/schedule',       scheduleRouter);
 app.use('/mfa',            mfaRouter);
 app.use('/notifications',  notificationsRouter);
+app.use('/telegram',       telegramRouter);
 
 // Start background AI forum moderation (fire-and-forget, every 10 min)
 startForumAIJob();
@@ -84,6 +87,11 @@ startVipExpiryJob();
 // Schedule-warmup autostart + stuck-'running' watchdog (every 15 min; a no-op
 // unless admin_settings.warmup_auto_hours is set above 0)
 startWarmupScheduleJob();
+
+// Регистрирует POST /telegram/webhook у Telegram как приёмник апдейтов
+// пользовательского бота — no-op, если TELEGRAM_USER_BOT_TOKEN/
+// TELEGRAM_WEBHOOK_URL не заданы (см. utils/registerTelegramWebhook.js).
+registerTelegramWebhook();
 
 // 404 for unmatched routes
 app.use((req, res) => {
