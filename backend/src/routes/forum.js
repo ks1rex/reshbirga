@@ -10,6 +10,9 @@ const { notifyUser } = require('../utils/notify');
 
 const router   = Router();
 const PAGE_SIZE = 20;
+// Отдельная константа для постов внутри темы: длинная тема иначе заставляет
+// пролистывать сотни сообщений, чтобы добраться до формы ответа внизу.
+const POSTS_PAGE_SIZE = 10;
 const MAX_ATTACHMENTS = 6; // держим в паре с ebu.gubkin/src/lib/attachments.ts
 
 // Упоминание в посте — фронт вставляет его как "@ник " (см.
@@ -172,7 +175,13 @@ router.get('/threads/:id', async (req, res) => {
     .eq('id', req.params.id)
     .single();
   if (error || !thread) return res.status(404).json({ error: 'Тема не найдена' });
-  res.json({ ...thread, author: withIsVip(thread.author) });
+
+  // Число уникальных участников — считаем по всем постам темы, а не только
+  // по загруженной странице (посты на фронте теперь постранично).
+  const { data: authorRows } = await supabase.from('forum_posts').select('author_id').eq('thread_id', req.params.id);
+  const participants_count = new Set([thread.author_id, ...(authorRows ?? []).map(p => p.author_id)]).size;
+
+  res.json({ ...thread, author: withIsVip(thread.author), participants_count });
 });
 
 // ── POST /forum/threads ───────────────────────────────────────────────────────
@@ -222,13 +231,15 @@ router.post('/threads', auth, isBanned, async (req, res) => {
 
 // ── POST /forum/threads/:id/view ─────────────────────────────────────────────
 router.post('/threads/:id/view', async (req, res) => {
-  await supabase.rpc('increment_thread_views', { thread_id: req.params.id }).catch(() => {
-    // Fallback if RPC doesn't exist
-    supabase.from('forum_threads').select('views_count').eq('id', req.params.id).single()
-      .then(({ data }) => {
-        if (data) supabase.from('forum_threads').update({ views_count: data.views_count + 1 }).eq('id', req.params.id);
-      });
-  });
+  // supabase-js не отклоняет промис RPC при ошибке Postgres (resolve с
+  // {error}, не reject) — .catch() тут никогда не срабатывал, поэтому
+  // сбой инкремента молча проходил мимо фолбэка и просмотры не считались.
+  const { error: rpcErr } = await supabase.rpc('increment_thread_views', { thread_id: req.params.id });
+  if (rpcErr) {
+    console.error('[forum] increment_thread_views failed, falling back:', rpcErr.message);
+    const { data } = await supabase.from('forum_threads').select('views_count').eq('id', req.params.id).single();
+    if (data) await supabase.from('forum_threads').update({ views_count: data.views_count + 1 }).eq('id', req.params.id);
+  }
   res.status(204).end();
 
   // Достижения за просмотры (fire-and-forget, после ответа). Репутацию форум
@@ -248,7 +259,7 @@ router.post('/threads/:id/view', async (req, res) => {
 // ── GET /forum/threads/:id/posts ──────────────────────────────────────────────
 router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
   const page   = Math.max(1, parseInt(req.query.page ?? '1', 10));
-  const offset = (page - 1) * PAGE_SIZE;
+  const offset = (page - 1) * POSTS_PAGE_SIZE;
   const AUTHOR = 'author:profiles!forum_posts_author_id_fkey(id, nickname, profile_slug, avatar_url, rating_as_executor, level, vip_expires_at)';
 
   const { data: posts, error } = await supabase
@@ -256,7 +267,7 @@ router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
     .select(`id, content, attachments, is_deleted, moderation_status, created_at, updated_at, ${AUTHOR}, reactions:forum_reactions(id, user_id, emoji)`)
     .eq('thread_id', req.params.id)
     .order('created_at', { ascending: true })
-    .range(offset, offset + PAGE_SIZE - 1);
+    .range(offset, offset + POSTS_PAGE_SIZE - 1);
 
   if (error) return serverError(res, error, 'forum:posts');
 
@@ -274,7 +285,7 @@ router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
     return withAuthor.is_deleted && !isAdmin ? { ...withAuthor, content: '', attachments: [], reactions: [] } : withAuthor;
   });
 
-  res.json({ posts: sanitized, page, has_more: (posts?.length ?? 0) === PAGE_SIZE });
+  res.json({ posts: sanitized, page, has_more: (posts?.length ?? 0) === POSTS_PAGE_SIZE });
 });
 
 // ── POST /forum/threads/:id/posts ─────────────────────────────────────────────
