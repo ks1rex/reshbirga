@@ -160,6 +160,16 @@ router.post('/:id/messages', auth, upload.array('files', 5), async (req, res) =>
   res.status(201).json({ ...msg, message_attachments: attachments, contact_warning: contactWarning, failed_files: failedFiles });
 });
 
+async function loadAttachment(convId, attId) {
+  const { data: att } = await supabase
+    .from('message_attachments')
+    .select('*, messages!inner(conversation_id)')
+    .eq('id', attId)
+    .single();
+  if (!att || att.messages?.conversation_id !== convId) return null;
+  return att;
+}
+
 // GET /conversations/:id/messages/:msgId/attachments/:attId/download
 router.get('/:id/messages/:msgId/attachments/:attId/download', auth, async (req, res) => {
   const { id: convId, attId } = req.params;
@@ -167,14 +177,8 @@ router.get('/:id/messages/:msgId/attachments/:attId/download', auth, async (req,
   const { allowed } = await checkAccess(convId, req.userId);
   if (!allowed) return res.status(403).json({ error: 'Forbidden' });
 
-  const { data: att } = await supabase
-    .from('message_attachments')
-    .select('*, messages!inner(conversation_id)')
-    .eq('id', attId)
-    .single();
-
-  if (!att || att.messages?.conversation_id !== convId)
-    return res.status(404).json({ error: 'Attachment not found' });
+  const att = await loadAttachment(convId, attId);
+  if (!att) return res.status(404).json({ error: 'Attachment not found' });
 
   const { data: signed, error: signErr } = await supabase.storage
     .from('chat-attachments')
@@ -182,6 +186,27 @@ router.get('/:id/messages/:msgId/attachments/:attId/download', auth, async (req,
 
   if (signErr) return serverError(res, signErr);
   res.json({ url: signed.signedUrl, filename: att.file_name });
+});
+
+// GET /conversations/:id/messages/:msgId/attachments/:attId/preview
+// Same signed URL as /download, but without a forced Content-Disposition —
+// so an image attachment can render inline via <img src>, which /download's
+// { download: file_name } option would otherwise break.
+router.get('/:id/messages/:msgId/attachments/:attId/preview', auth, async (req, res) => {
+  const { id: convId, attId } = req.params;
+
+  const { allowed } = await checkAccess(convId, req.userId);
+  if (!allowed) return res.status(403).json({ error: 'Forbidden' });
+
+  const att = await loadAttachment(convId, attId);
+  if (!att) return res.status(404).json({ error: 'Attachment not found' });
+
+  const { data: signed, error: signErr } = await supabase.storage
+    .from('chat-attachments')
+    .createSignedUrl(att.file_path, 300);
+
+  if (signErr) return serverError(res, signErr);
+  res.json({ url: signed.signedUrl });
 });
 
 module.exports = router;

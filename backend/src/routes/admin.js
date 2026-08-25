@@ -903,6 +903,28 @@ router.get('/conversations/:id/messages/:msgId/attachments/:attId/download', asy
   res.json({ url: signed.signedUrl, filename: att.file_name });
 });
 
+// GET /admin/conversations/:id/messages/:msgId/attachments/:attId/preview
+// Same as /download but no forced Content-Disposition, so images render inline via <img src>.
+router.get('/conversations/:id/messages/:msgId/attachments/:attId/preview', async (req, res) => {
+  const { id: convId, attId } = req.params;
+
+  const { data: att } = await supabase
+    .from('message_attachments')
+    .select('*, messages!inner(conversation_id)')
+    .eq('id', attId)
+    .single();
+
+  if (!att || att.messages?.conversation_id !== convId)
+    return res.status(404).json({ error: 'Attachment not found' });
+
+  const { data: signed, error: signErr } = await supabase.storage
+    .from('chat-attachments')
+    .createSignedUrl(att.file_path, 300);
+
+  if (signErr) return serverError(res, signErr);
+  res.json({ url: signed.signedUrl });
+});
+
 // ─── Settings ───────────────────────────────────────────────
 
 // PUT /admin/settings/:key  (site_settings — payment requisites etc.)

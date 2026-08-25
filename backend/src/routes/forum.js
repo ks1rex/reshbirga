@@ -9,6 +9,7 @@ const { withIsVip } = require('../utils/vip');
 
 const router   = Router();
 const PAGE_SIZE = 20;
+const MAX_ATTACHMENTS = 6; // держим в паре с ebu.gubkin/src/lib/attachments.ts
 
 // ── Optional auth (sets req.userId if token valid, doesn't reject anon) ──────
 async function optionalAuth(req, _res, next) {
@@ -151,12 +152,13 @@ router.get('/threads/:id', async (req, res) => {
 
 // ── POST /forum/threads ───────────────────────────────────────────────────────
 router.post('/threads', auth, isBanned, async (req, res) => {
-  const { category_id, title, content } = req.body;
+  const { category_id, title, content, cover_url, attachments } = req.body;
   if (!category_id || !title?.trim() || !content?.trim()) {
     return res.status(400).json({ error: 'Укажите категорию, заголовок и текст' });
   }
   if (title.trim().length > 200) return res.status(400).json({ error: 'Заголовок не более 200 символов' });
   if (content.trim().length > 10000) return res.status(400).json({ error: 'Текст не более 10 000 символов' });
+  const safeAttachments = Array.isArray(attachments) ? attachments.slice(0, MAX_ATTACHMENTS) : [];
 
   const { data: cat } = await supabase
     .from('forum_categories').select('is_active').eq('id', category_id).maybeSingle();
@@ -171,7 +173,7 @@ router.post('/threads', auth, isBanned, async (req, res) => {
   // Create thread + first post in a single batch
   const { data: thread, error: te } = await supabase
     .from('forum_threads')
-    .insert({ category_id, author_id: req.userId, title: title.trim() })
+    .insert({ category_id, author_id: req.userId, title: title.trim(), cover_url: cover_url || null })
     .select('id')
     .single();
   if (te) return serverError(res, te, 'forum:create-thread');
@@ -180,6 +182,7 @@ router.post('/threads', auth, isBanned, async (req, res) => {
     thread_id:         thread.id,
     author_id:         req.userId,
     content:           content.trim(),
+    attachments:       safeAttachments,
     moderation_status: process.env.DEEPSEEK_API_KEY ? 'pending_review' : 'approved',
   });
   if (pe) return serverError(res, pe, 'forum:create-first-post');
@@ -222,7 +225,7 @@ router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
 
   const { data: posts, error } = await supabase
     .from('forum_posts')
-    .select(`id, content, is_deleted, moderation_status, created_at, updated_at, ${AUTHOR}, reactions:forum_reactions(id, user_id, emoji)`)
+    .select(`id, content, attachments, is_deleted, moderation_status, created_at, updated_at, ${AUTHOR}, reactions:forum_reactions(id, user_id, emoji)`)
     .eq('thread_id', req.params.id)
     .order('created_at', { ascending: true })
     .range(offset, offset + PAGE_SIZE - 1);
@@ -240,7 +243,7 @@ router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
 
   const sanitized = (posts ?? []).map(p => {
     const withAuthor = { ...p, author: withIsVip(p.author) };
-    return withAuthor.is_deleted && !isAdmin ? { ...withAuthor, content: '', reactions: [] } : withAuthor;
+    return withAuthor.is_deleted && !isAdmin ? { ...withAuthor, content: '', attachments: [], reactions: [] } : withAuthor;
   });
 
   res.json({ posts: sanitized, page, has_more: (posts?.length ?? 0) === PAGE_SIZE });
@@ -248,16 +251,17 @@ router.get('/threads/:id/posts', optionalAuth, async (req, res) => {
 
 // ── POST /forum/threads/:id/posts ─────────────────────────────────────────────
 router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
-  const { content } = req.body;
-  if (!content?.trim()) return res.status(400).json({ error: 'Текст не может быть пустым' });
-  if (content.trim().length > 10000) return res.status(400).json({ error: 'Текст не более 10 000 символов' });
+  const { content, attachments } = req.body;
+  const safeAttachments = Array.isArray(attachments) ? attachments.slice(0, MAX_ATTACHMENTS) : [];
+  if (!content?.trim() && safeAttachments.length === 0) return res.status(400).json({ error: 'Текст не может быть пустым' });
+  if ((content ?? '').trim().length > 10000) return res.status(400).json({ error: 'Текст не более 10 000 символов' });
 
   // Check thread exists and is not locked
   const { data: thread } = await supabase.from('forum_threads').select('id, is_locked').eq('id', req.params.id).single();
   if (!thread) return res.status(404).json({ error: 'Тема не найдена' });
   if (thread.is_locked) return res.status(403).json({ error: 'Тема закрыта для новых ответов' });
 
-  const mod = await moderateSync(content, req.userId);
+  const mod = await moderateSync(content ?? '', req.userId);
   if (mod.blocked) {
     const msgs = { extremism: 'Пост содержит запрещённый контент', advertising: 'Пост содержит рекламу', spam: 'Пост определён как спам' };
     return res.status(422).json({ error: msgs[mod.reason] ?? 'Пост не прошёл модерацию' });
@@ -268,10 +272,11 @@ router.post('/threads/:id/posts', auth, isBanned, async (req, res) => {
     .insert({
       thread_id:         req.params.id,
       author_id:         req.userId,
-      content:           content.trim(),
+      content:           (content ?? '').trim(),
+      attachments:       safeAttachments,
       moderation_status: process.env.DEEPSEEK_API_KEY ? 'pending_review' : 'approved',
     })
-    .select(`id, content, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at)`)
+    .select(`id, content, attachments, created_at, author:profiles!forum_posts_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at)`)
     .single();
 
   if (error) return serverError(res, error, 'forum:reply');
