@@ -77,7 +77,7 @@ router.get('/threads', async (req, res) => {
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit ?? '10', 10)));
   const sort  = req.query.sort ?? 'activity';
   const AUTHOR   = 'author:profiles!forum_threads_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at)';
-  const CATEGORY = 'category:forum_categories(id, name, icon_name)';
+  const CATEGORY = 'category:forum_categories(id, name, icon_name, icon_url)';
 
   // Скрытая категория не должна протекать в «горячие темы» на главной.
   // Фильтр по id, а не по вложенному forum_categories.is_active: список
@@ -133,7 +133,7 @@ router.get('/categories/:id/threads', async (req, res) => {
   if (error) return serverError(res, error, 'forum:threads');
 
   // Category info for breadcrumb
-  const { data: category } = await supabase.from('forum_categories').select('id, name, icon_name').eq('id', req.params.id).single();
+  const { data: category } = await supabase.from('forum_categories').select('id, name, icon_name, icon_url').eq('id', req.params.id).single();
 
   res.json({ category, threads: (threads ?? []).map(t => ({ ...t, author: withIsVip(t.author) })), page, has_more: (threads?.length ?? 0) === PAGE_SIZE });
 });
@@ -142,7 +142,7 @@ router.get('/categories/:id/threads', async (req, res) => {
 router.get('/threads/:id', async (req, res) => {
   const { data: thread, error } = await supabase
     .from('forum_threads')
-    .select(`*, author:profiles!forum_threads_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at), category:forum_categories(id, name, icon_name)`)
+    .select(`*, author:profiles!forum_threads_author_id_fkey(id, nickname, profile_slug, avatar_url, vip_expires_at), category:forum_categories(id, name, icon_name, icon_url)`)
     .eq('id', req.params.id)
     .single();
   if (error || !thread) return res.status(404).json({ error: 'Тема не найдена' });

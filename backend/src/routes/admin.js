@@ -1263,7 +1263,7 @@ router.post('/forum/reports/:id/resolve', async (req, res) => {
 router.get('/forum/categories', async (req, res) => {
   const { data, error } = await supabase
     .from('forum_categories')
-    .select('id, name, description, icon_name, sort_order, is_active')
+    .select('id, name, description, icon_name, icon_url, sort_order, is_active')
     .order('sort_order');
   if (error) return serverError(res, error);
   res.json(data ?? []);
@@ -1283,17 +1283,55 @@ router.post('/forum/categories', async (req, res) => {
 
 // PATCH /admin/forum/categories/:id
 router.patch('/forum/categories/:id', async (req, res) => {
-  const { name, description, icon_name, sort_order, is_active } = req.body;
+  const { name, description, icon_name, icon_url, sort_order, is_active } = req.body;
   const updates = {};
   if (name        !== undefined) updates.name        = name;
   if (description !== undefined) updates.description = description;
   if (icon_name   !== undefined) updates.icon_name   = icon_name;
+  if (icon_url    !== undefined) updates.icon_url    = icon_url;
   if (sort_order  !== undefined) updates.sort_order  = sort_order;
   if (is_active   !== undefined) updates.is_active   = is_active;
   if (!Object.keys(updates).length) return res.status(400).json({ error: 'Нет полей для обновления' });
   const { error } = await supabase.from('forum_categories').update(updates).eq('id', req.params.id);
   if (error) return serverError(res, error);
   res.json({ success: true });
+});
+
+// POST /admin/forum/categories/:id/icon — кастомная картинка вместо эмодзи.
+// Ужимать не нужно: лимит бакета 2 МБ уже отсекает то, что не подходит для
+// иконки 40×40–56×56 в интерфейсе.
+const iconUpload = require('multer')({
+  storage: require('multer').memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024, files: 1 },
+  fileFilter(req, file, cb) {
+    if (!/^image\/(jpeg|png|webp|gif)$/.test(file.mimetype)) {
+      const e = new Error('Допустимы только изображения (jpeg/png/webp/gif)');
+      e.status = 400;
+      return cb(e);
+    }
+    cb(null, true);
+  },
+}).single('file');
+
+router.post('/forum/categories/:id/icon', (req, res) => {
+  iconUpload(req, res, async (err) => {
+    if (err) return res.status(err.status ?? 400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'Файл не передан' });
+
+    const ext = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' }[req.file.mimetype];
+    const path = `${req.params.id}-${Date.now()}.${ext}`;
+
+    const { error: upErr } = await supabase.storage
+      .from('forum-icons')
+      .upload(path, req.file.buffer, { contentType: req.file.mimetype });
+    if (upErr) return serverError(res, upErr);
+
+    const { data: { publicUrl } } = supabase.storage.from('forum-icons').getPublicUrl(path);
+    const { error } = await supabase.from('forum_categories').update({ icon_url: publicUrl }).eq('id', req.params.id);
+    if (error) return serverError(res, error);
+
+    res.json({ icon_url: publicUrl });
+  });
 });
 
 // DELETE /admin/forum/categories/:id
