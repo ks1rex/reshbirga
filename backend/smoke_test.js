@@ -1,5 +1,5 @@
 /**
- * Smoke test for СтудБиржа backend — balance-based order flow.
+ * Smoke test for Ebu.Gubkin backend — balance-based order flow.
  * Covers: deposit cycle, order creation with instant deduction, auction refund_excess,
  *   awaiting_topup → topup, cancel open order, executor payout on completion, withdrawal,
  *   VIP purchase (cumulative extension, insufficient balance), dispute resolve, support, ban.
@@ -160,7 +160,7 @@ async function cleanupTestData(ids) {
 
 async function run() {
   console.log('\n══════════════════════════════════════════');
-  console.log('  СтудБиржа Smoke Test (balance-based)');
+  console.log('  Ebu.Gubkin Smoke Test (balance-based)');
   console.log(`  Target: ${BASE}`);
   console.log('══════════════════════════════════════════\n');
 
