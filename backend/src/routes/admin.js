@@ -1394,6 +1394,53 @@ router.delete('/forum/categories/:id', async (req, res) => {
   res.json({ success: true });
 });
 
+// ─── Market categories (admin) — фильтры "Учёба", "Другое" и т.д. ─────────
+// у заказов/объявлений (market_categories, 0025). id — произвольный text PK,
+// на создании генерируется, т.к. orders.category/listings.category хранят
+// его как обычный текст без FK — переименование категории не ломает связи.
+
+// GET /admin/market-categories
+router.get('/market-categories', async (req, res) => {
+  const { data, error } = await supabase
+    .from('market_categories')
+    .select('id, name, icon, sort_order')
+    .order('sort_order');
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/market-categories
+router.post('/market-categories', async (req, res) => {
+  const { name, icon, sort_order } = req.body;
+  if (!name?.trim()) return res.status(400).json({ error: 'Укажите название категории' });
+  const { data, error } = await supabase
+    .from('market_categories')
+    .insert({ id: require('crypto').randomUUID(), name: name.trim(), icon: icon || null, sort_order: sort_order ?? 99 })
+    .select().single();
+  if (error) return serverError(res, error);
+  res.status(201).json(data);
+});
+
+// PATCH /admin/market-categories/:id
+router.patch('/market-categories/:id', async (req, res) => {
+  const { name, icon, sort_order } = req.body;
+  const updates = {};
+  if (name       !== undefined) updates.name       = name;
+  if (icon       !== undefined) updates.icon       = icon;
+  if (sort_order !== undefined) updates.sort_order = sort_order;
+  if (!Object.keys(updates).length) return res.status(400).json({ error: 'Нет полей для обновления' });
+  const { error } = await supabase.from('market_categories').update(updates).eq('id', req.params.id);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
+// DELETE /admin/market-categories/:id
+router.delete('/market-categories/:id', async (req, res) => {
+  const { error } = await supabase.from('market_categories').delete().eq('id', req.params.id);
+  if (error) return serverError(res, error);
+  res.json({ success: true });
+});
+
 // GET /admin/schedule-warmup/status
 router.get('/schedule-warmup/status', async (req, res) => {
   const state = await scheduleWarmup.getState();
