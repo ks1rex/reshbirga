@@ -21,6 +21,7 @@ const scheduleRouter       = require('./routes/schedule');
 const mfaRouter            = require('./routes/mfa');
 const notificationsRouter  = require('./routes/notifications');
 const telegramRouter       = require('./routes/telegram');
+const newsRouter           = require('./routes/news');
 const { startForumAIJob }  = require('./utils/forumModerator');
 const { startVipExpiryJob } = require('./utils/vipExpiry');
 const { startWarmupScheduleJob } = require('./jobs/scheduleWarmup');
@@ -78,6 +79,7 @@ app.use('/schedule',       scheduleRouter);
 app.use('/mfa',            mfaRouter);
 app.use('/notifications',  notificationsRouter);
 app.use('/telegram',       telegramRouter);
+app.use('/news',           newsRouter);
 
 // Start background AI forum moderation (fire-and-forget, every 10 min)
 startForumAIJob();
