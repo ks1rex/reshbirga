@@ -12,8 +12,12 @@ Repo is in Russian (UI text, commit-adjacent docs, error messages). Match that w
 
 ## Stack
 
-- Backend: Node.js 20 + Express, deployed to Render as Docker
-- DB/Auth/Storage: Supabase (Postgres + RLS + S3 storage) — schema details in `@docs/schema.md`
+- Backend: Node.js 20 + Express, deployed as Docker to a self-hosted Timeweb
+  VPS since 2026-08-26 (`backend.ebugubkin.ru`, was Render before — see root
+  `CLAUDE.md` "Infrastructure")
+- DB/Auth/Storage: self-hosted Supabase (Postgres + RLS + Storage on Timeweb
+  S3) at `api.ebugubkin.ru`, same official `supabase/docker` stack the other
+  two repos share — schema details in `@docs/schema.md`
 - AI moderation: DeepSeek API (`deepseek-chat`)
 - Notifications: Telegram Bot API, called synchronously from Express (`backend/src/utils/telegramNotify.js`) — an earlier Supabase Edge Function path (`notify-admin-events`) was dead code and removed (2026-07-16), see `docs/schema.md`. Current senders: `routes/admin.js` (deposit confirmed, referral bonus, dispute resolved), `routes/orders.js` (new dispute), `routes/wallet.js` (deposit/withdrawal requests), `routes/support.js` (new support ticket), `routes/conversations.js` (regex contact-info flag in a chat — currently dormant, see Stack note above), `utils/aiChatCheck.js` (AI chat flags, one digest per order), `utils/forumModerator.js` (forum AI flags), `jobs/scheduleWarmup.js` (autostart needs captcha / stuck run reset), `routes/mfa.js` (2FA removed via backup code, and failed attempts)
 - `frontend/` in this repo is **deprecated and unused**. The real, active UI lives in the separate `ebu.gubkin` repository.
@@ -41,7 +45,7 @@ No linter/formatter configured — match the style of surrounding code (CommonJS
 backend/
 ├── main.js               # entry point
 ├── smoke_test.js          # integration test (see Commands)
-├── Dockerfile             # Render deploy target
+├── Dockerfile             # built/run on the self-hosted VPS, /opt/apps/reshbirga
 └── src/
     ├── app.js             # middleware stack + route mounts
     ├── routes/            # orders, admin, wallet, conversations, listings, profile, forum, gost, settings, stats, support, users, health
@@ -58,7 +62,7 @@ frontend/                  # deprecated, see Stack above — do not extend
 
 ## Deployment
 
-Backend ships as a Docker image (`backend/Dockerfile`) to Render; env vars are set in the Render dashboard, not committed. There is no CI/CD workflow for the backend in this repo — deploys are triggered from Render directly on push. The `ebu.gubkin` repo owns its own frontend deploy pipeline.
+Backend ships as a Docker image (`backend/Dockerfile`), built and run manually on the self-hosted Timeweb VPS at `/opt/apps/reshbirga` (`git pull` + `docker build` + `docker restart reshbirga-backend`); `.env` lives only on the server, not committed. There is no CI/CD workflow for the backend in this repo — no auto-deploy on push (Render, which used to provide that, is decommissioned as of 2026-08-26). The `ebu.gubkin` repo owns its own frontend deploy pipeline.
 
 ## Architecture
 
@@ -85,10 +89,30 @@ included); `is_owner` is a second, narrower flag checked by a new
 `adminMiddleware.requireOwner` export, applied as `router.use([...paths],
 requireOwner)` in `routes/admin.js` to the path-prefix groups a rank-and-file
 admin must **not** reach: `/ledger`, `/stats`, `/deposits`, `/withdrawals`,
-`/settings`, `/admin-settings`, `/finance`, `/vip`, `/schedule-warmup`.
-Disputes/forum/orders/chat/moderation/support/users and `mfa.js` (own-account
+`/settings`, `/admin-settings`, `/finance`, `/vip`, `/schedule-warmup`,
+`/market-categories` (added 2026-08-26, backs the "Категории биржи"
+subsection of Настройки). Two more owner-only admin sections, added
+2026-08-26, don't use this list at all — `routes/news.js` and
+`routes/teachers.js` are separate routers (mounted at `/news`, `/teachers`,
+not under `/admin`) with their own inline `requireOwner(req, res)` helper on
+each mutating route, since their `GET` routes are intentionally public
+(no auth at all) unlike everything else here.
+
+**Чаты (`GET /admin/conversations`) is owner-only via a different mechanism
+than the path-prefix list** (since 2026-08-24) — it can't be, because
+`Admin/Support.tsx` reuses this exact same endpoint for the (non-owner-open)
+"Поддержка" ticket list. Instead the handler itself pins a non-owner caller
+to `type=support_ticket` regardless of what `type` they pass in the query
+string — they keep ticket browsing, but lose free browsing of order chats.
+`ebu.gubkin`'s `NAV_ITEMS` still marks `/admin/conversations` (Чаты)
+`ownerOnly: true` so a non-owner never sees the "browse everything" UI in
+the first place; a non-owner hitting the API directly gets silently
+narrowed, not 403'd.
+
+Disputes/forum/orders/moderation/support/users and `mfa.js` (own-account
 2FA) stay open to any admin. `ebu.gubkin` mirrors this in the UI (nav
-filtering, `AdminRoute` path allowlist) — the backend 403 is the real
+filtering, `AdminRoute` path allowlist) — the backend 403 (or, for Чаты, the
+silent narrowing above) is the real
 boundary, the UI hiding is cosmetic on top of it.
 
 - **`GET /admin/users`** omits `is_owner` from the response entirely (not
@@ -121,7 +145,7 @@ boundary, the UI hiding is cosmetic on top of it.
 
 **Backup codes are ours, not GoTrue's** (`routes/mfa.js`, table `admin_mfa_backup_codes`). GoTrue has no backup-code concept and will not issue an `aal2` session for anything but a real TOTP — so a code *removes* the factor (`auth.admin.mfa.deleteFactor`) and the admin re-enrolls, rather than logging them in. Consequence worth remembering before "tidying up" the router: `POST /mfa/recover` must **not** sit behind `adminMiddleware`, because that middleware demands `aal2` from exactly the admins who need recovery — it does its own inline `is_admin` check instead. Codes are 16 chars (~79 bits) hashed with plain sha256 (high-entropy secret, not a password) and shown once.
 
-**Middleware stack** (`backend/src/app.js`, in order): `helmet` (CSP/COEP disabled — this is a JSON API, no server-rendered HTML), `express-rate-limit` (300 req/min per IP, generous enough for 5s chat polling), `cors` (origin allowlist from `FRONTEND_URL`, comma-separated), `express.json()`. App trusts the first proxy hop (`trust proxy = 1`) for correct client IPs behind Render.
+**Middleware stack** (`backend/src/app.js`, in order): `helmet` (CSP/COEP disabled — this is a JSON API, no server-rendered HTML), `express-rate-limit` (300 req/min per IP, generous enough for 5s chat polling), `cors` (origin allowlist from `FRONTEND_URL`, comma-separated), `express.json()`. App trusts the first proxy hop (`trust proxy = 1`) for correct client IPs behind Caddy (the VPS's reverse proxy).
 
 **Error handling is centralized.** A single error-handling middleware at the end of `app.js` maps `multer` file-upload errors, `err.status === 400`, and malformed-JSON body errors to `{ error: '<Russian message>' }` with the right status; anything else logs server-side and returns a generic 500. Don't add per-route try/catch that duplicates this — let errors propagate (routes use async handlers that funnel into it) unless a route needs a specific status/message.
 
