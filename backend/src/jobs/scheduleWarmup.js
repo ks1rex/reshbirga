@@ -14,6 +14,38 @@ const GUBKIN_HEADERS = {
 let shouldCancel = false;
 let forceRefetch = false;
 
+// Teachers seen during the current warmup run, keyed by full name so the
+// same person met across many groups/dates is only counted once. Lessons
+// only ever come from the Moscow organization (see `moscow.lessons` below),
+// so this is already scoped to Moscow — no separate "not Moscow" filter needed.
+let seenTeachers = new Map();
+
+function collectTeachers(lessons) {
+  for (const lesson of lessons || []) {
+    for (const t of lesson.teachers || []) {
+      if (!t.lastName) continue;
+      const fullName = [t.lastName, t.firstName, t.patronymic].filter(Boolean).join(' ');
+      if (!seenTeachers.has(fullName)) seenTeachers.set(fullName, fullName);
+    }
+  }
+}
+
+// Adds any newly-seen teacher to the `teachers` directory. No unique
+// constraint on full_name, so dedupe against existing rows here instead.
+async function syncTeachers() {
+  if (seenTeachers.size === 0) return { added: 0 };
+  const { data: existing } = await fetchAll(() => supabase.from('teachers').select('full_name'));
+  const existingNames = new Set((existing ?? []).map(r => r.full_name));
+  const toInsert = [...seenTeachers.keys()]
+    .filter(name => !existingNames.has(name))
+    .map(full_name => ({ full_name }));
+  if (toInsert.length) {
+    const { error } = await supabase.from('teachers').insert(toInsert);
+    if (error) { console.error('[Warmup] teacher insert error', error.message); return { added: 0 }; }
+  }
+  return { added: toInsert.length };
+}
+
 async function getFreshCaptcha() {
   try {
     // Шаг 1: заходим на главную страницу — получаем первичную куку сессии
@@ -191,6 +223,7 @@ async function resetWarmup() {
 async function runFullWarmup(cookie) {
   try {
     const warm = forceRefetch ? new Set() : await loadWarmCacheKeys();
+    seenTeachers = new Map();
     let skipped = 0;
 
     if (forceRefetch || !warm.has('faculties')) {
@@ -246,6 +279,7 @@ async function runFullWarmup(cookie) {
             timeChunks: moscow?.lessonsTimeChunks || [],
             lessons: moscow?.lessons || [],
           }, 30);
+          collectTeachers(moscow?.lessons);
           success++;
         } catch (e) {
           errors++;
@@ -268,8 +302,10 @@ async function runFullWarmup(cookie) {
       }
     }
 
-    await updateState({ status: 'done', last_run_at: new Date().toISOString(), progress_step: `готово: ${success} новых, ${skipped} из кэша, ${errors} ошибок` });
-    console.log(`[Warmup] Done! Success: ${success}, Skipped(cached): ${skipped}, Errors: ${errors}`);
+    const { added: teachersAdded } = await syncTeachers();
+
+    await updateState({ status: 'done', last_run_at: new Date().toISOString(), progress_step: `готово: ${success} новых, ${skipped} из кэша, ${errors} ошибок, ${teachersAdded} новых преподавателей` });
+    console.log(`[Warmup] Done! Success: ${success}, Skipped(cached): ${skipped}, Errors: ${errors}, Teachers added: ${teachersAdded}`);
   } catch (e) {
     console.error('[Warmup ERROR]', { message: e.message, stack: e.stack, name: e.name, cause: e.cause });
     await updateState({ status: 'error', last_error: e.message });
