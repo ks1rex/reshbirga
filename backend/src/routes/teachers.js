@@ -60,13 +60,14 @@ router.get('/:id', async (req, res) => {
 // POST /teachers — владелец
 router.post('/', auth, async (req, res) => {
   if (!(await requireOwner(req, res))) return;
-  const { full_name, position, photo_url } = req.body;
+  const { full_name, department, position, photo_url } = req.body;
   if (!full_name?.trim()) return res.status(400).json({ error: 'full_name is required' });
 
   const { data, error } = await supabase
     .from('teachers')
     .insert({
       full_name: full_name.trim(),
+      department: department?.trim() || null,
       position: position?.trim() || null,
       photo_url: photo_url?.trim() || null,
     })
@@ -79,12 +80,13 @@ router.post('/', auth, async (req, res) => {
 // PATCH /teachers/:id — владелец
 router.patch('/:id', auth, async (req, res) => {
   if (!(await requireOwner(req, res))) return;
-  const { full_name, position, photo_url } = req.body;
+  const { full_name, department, position, photo_url } = req.body;
   const patch = {};
   if (full_name !== undefined) {
     if (!full_name.trim()) return res.status(400).json({ error: 'full_name is required' });
     patch.full_name = full_name.trim();
   }
+  if (department !== undefined) patch.department = department?.trim() || null;
   if (position !== undefined) patch.position = position?.trim() || null;
   if (photo_url !== undefined) patch.photo_url = photo_url?.trim() || null;
 
