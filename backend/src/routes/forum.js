@@ -359,7 +359,10 @@ router.delete('/posts/:id', auth, async (req, res) => {
 
 // ── POST /forum/posts/:id/react ───────────────────────────────────────────────
 router.post('/posts/:id/react', auth, async (req, res) => {
-  const ALLOWED = ['👍', '👎', '😂', '🔥'];
+  // Держать в синхроне с REPLY_EMOJIS в ebu.gubkin/src/pages/ForumThread.tsx —
+  // это один и тот же набор, используется и для реакций, и для смайликов
+  // в редакторе ответа.
+  const ALLOWED = ['😀', '😂', '😍', '🤔', '😢', '😡', '👍', '👎', '🔥', '🎉', '🙏', '😮', '😴', '🤝', '💯', '❤️'];
   const { emoji } = req.body;
   if (!ALLOWED.includes(emoji)) return res.status(400).json({ error: 'Недопустимая реакция' });
 
