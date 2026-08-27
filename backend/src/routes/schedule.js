@@ -5,7 +5,7 @@ const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 
 const DEFAULT_STUDY_ID = 62;
-const NOT_WARMED = { error: 'Расписание ещё не загружено. Администратор должен запустить прогрев.' };
+const NOT_WARMED = { error: 'Расписание пока не загружено.' };
 
 // Только чтение кеша — live-запросы к lk.gubkin.ru выполняются исключительно
 // прогревом (см. jobs/scheduleWarmup.js и /admin/schedule-warmup/*).
