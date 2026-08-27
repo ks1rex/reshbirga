@@ -82,20 +82,29 @@ router.get('/categories', async (req, res) => {
     .eq('is_active', true)
     .order('sort_order');
   if (error) return serverError(res, error, 'forum:categories');
+  if (!cats.length) return res.json([]);
 
-  // Augment with thread count + last 2 threads (preview list; last_thread
-  // kept as recent[0] for backward compat with existing frontend callers)
-  const result = await Promise.all(cats.map(async (cat) => {
-    const [{ count }, { data: recent }] = await Promise.all([
-      supabase.from('forum_threads').select('id', { count: 'exact', head: true }).eq('category_id', cat.id),
-      supabase.from('forum_threads')
-        .select('id, title, last_post_at, last_post_author:profiles!forum_threads_last_post_author_id_fkey(nickname, profile_slug, avatar_url)')
-        .eq('category_id', cat.id)
-        .order('last_post_at', { ascending: false, nullsFirst: false })
-        .limit(2),
-    ]);
-    return { ...cat, threads_count: count ?? 0, recent_threads: recent ?? [], last_thread: recent?.[0] ?? null };
-  }));
+  // Раньше это было Promise.all(cats.map(...2 запроса на категорию...)) —
+  // N+1: на 8 категорий 16 отдельных запросов к PostgREST на один ответ,
+  // под конкурентной нагрузкой давало хвост в несколько секунд (см. нагрузочный
+  // тест 27.08.2026). Вместо этого один запрос всех тем нужных категорий,
+  // группировка на count/recent_threads делается уже здесь, в Node.
+  const catIds = cats.map(c => c.id);
+  const { data: threads, error: tErr } = await supabase
+    .from('forum_threads')
+    .select('id, category_id, title, last_post_at, last_post_author:profiles!forum_threads_last_post_author_id_fkey(nickname, profile_slug, avatar_url)')
+    .in('category_id', catIds)
+    .order('last_post_at', { ascending: false, nullsFirst: false });
+  if (tErr) return serverError(res, tErr, 'forum:categories:threads');
+
+  const byCategory = {};
+  for (const t of threads ?? []) (byCategory[t.category_id] ??= []).push(t);
+
+  const result = cats.map(cat => {
+    const list = byCategory[cat.id] ?? [];
+    const recent_threads = list.slice(0, 2);
+    return { ...cat, threads_count: list.length, recent_threads, last_thread: recent_threads[0] ?? null };
+  });
 
   res.json(result);
 });
