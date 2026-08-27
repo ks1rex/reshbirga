@@ -2,6 +2,7 @@ const { Router } = require('express');
 const auth = require('../middleware/auth');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
+const { fetchAll } = require('../utils/pagedFetch');
 
 const router = Router();
 
@@ -30,7 +31,7 @@ async function withStats(teachers) {
 
 // GET /teachers — публично, со статистикой рейтинга
 router.get('/', async (req, res) => {
-  const { data, error } = await supabase.from('teachers').select('*').order('full_name');
+  const { data, error } = await fetchAll(() => supabase.from('teachers').select('*').order('full_name'));
   if (error) return serverError(res, error);
   res.json(await withStats(data ?? []));
 });
