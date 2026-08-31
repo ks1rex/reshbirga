@@ -49,8 +49,11 @@ async function parseOrThrow(resp) {
   return body;
 }
 
-// amountMinor: integer, minor units (RUB * 100). payment_method intentionally
-// omitted — buyer picks it on payment_url (common payform), per spec.
+// amountMinor: integer, minor units (RUB * 100). payment_method is
+// intentionally NEVER sent (not even null) — per spec, omitting it puts the
+// buyer on the "common payform", which only lists whatever's enabled for our
+// merchant. Right now that's crypto only (СБП/карта go through a separate,
+// not-yet-agreed gateway) — toggled in Cashera's own dashboard, not here.
 async function createTransaction({ amountMinor, externalId, description, callbackUrl, successUrl, failUrl }) {
   const resp = await requestWithRetry('/integration/transactions', {
     method: 'POST',

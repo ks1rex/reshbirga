@@ -137,10 +137,13 @@ router.get('/deposits', async (req, res) => {
 // for Cashera deposits to allow a bigger single top-up.
 const CASHERA_DEPOSIT_MAX = 500_000;
 
-// POST /wallet/cashera/deposits — creates a Cashera checkout (no
-// payment_method: buyer picks sbp/card/etc. on payment_url) and returns the
-// redirect link. The deposit itself is only credited by the /webhooks/cashera
-// handler once status becomes 'paid' — this endpoint never touches balance.
+// POST /wallet/cashera/deposits — creates a Cashera checkout (payment_method
+// omitted, per spec) and returns the redirect link. Crypto-only for now —
+// СБП/карта aren't enabled on our Cashera merchant yet (separate, not-yet-
+// agreed gateway), so the common payform Cashera shows the buyer only lists
+// crypto; nothing to pin on our side. The deposit itself is only credited by
+// the /webhooks/cashera handler once status becomes 'paid' — this endpoint
+// never touches balance.
 router.post('/cashera/deposits', isBanned, async (req, res) => {
   const amount = parseFloat(req.body.amount);
   if (!amount || amount <= 0 || isNaN(amount))
