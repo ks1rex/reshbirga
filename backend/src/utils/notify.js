@@ -19,11 +19,13 @@ async function notifyUser(userId, type, title, body, link) {
   const { data: prof } = await supabase.from('profiles')
     .select('telegram_chat_id').eq('id', userId).single();
   if (prof?.telegram_chat_id) {
-    // FRONTEND_URL — это просто origin для CORS (без пути), а Vite у
-    // ebu.gubkin деплоится с base '/Ebu.Gubkin/' (см. CLAUDE.md) — путь
-    // приходится дописывать руками, иначе ссылка ведёт мимо приложения.
-    const site = (process.env.FRONTEND_URL || '').split(',')[0]?.trim().replace(/\/$/, '');
-    const fullLink = link && site ? `${site}/Ebu.Gubkin${link}` : null;
+    // FRONTEND_URL — это CORS-allowlist (несколько origin через запятую,
+    // первый — ks1rex.github.io, не настоящий прод), для ссылки в уведомлении
+    // нужен ровно один канонический адрес — SITE_URL (см. root CLAUDE.md
+    // "Infrastructure": реальный прод — ebugubkin.ru с base '/', а не GitHub
+    // Pages с base '/Ebu.Gubkin/', так что путь дописывать не нужно).
+    const site = (process.env.SITE_URL || '').trim().replace(/\/$/, '');
+    const fullLink = link && site ? `${site}${link}` : null;
     const text = [title, body, fullLink].filter(Boolean).join('\n\n');
     sendUserTelegram(prof.telegram_chat_id, text);
   }

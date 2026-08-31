@@ -89,9 +89,15 @@ included); `is_owner` is a second, narrower flag checked by a new
 `adminMiddleware.requireOwner` export, applied as `router.use([...paths],
 requireOwner)` in `routes/admin.js` to the path-prefix groups a rank-and-file
 admin must **not** reach: `/ledger`, `/stats`, `/deposits`, `/withdrawals`,
-`/settings`, `/admin-settings`, `/finance`, `/vip`, `/schedule-warmup`,
-`/market-categories` (added 2026-08-26, backs the "Категории биржи"
-subsection of Настройки). Two more owner-only admin sections, added
+`/settings`, `/admin-settings`, `/finance`, `/vip`, `/schedule-warmup`.
+`/market-categories` was in this list too (added 2026-08-26) until
+2026-08-28, when it was pulled back out so rank-and-file admins could reach
+the new category-moderation queue mounted under the same prefix (see "Market
+category self-service" below) — `requireOwner` is now applied per-route
+instead, only on the three raw CRUD routes (`POST`/`PATCH`/`DELETE
+/market-categories`, backing the "Категории биржи" subsection of Настройки),
+not on `GET /market-categories` or anything under `/market-categories/requests`.
+Two more owner-only admin sections, added
 2026-08-26, don't use this list at all — `routes/news.js` and
 `routes/teachers.js` are separate routers (mounted at `/news`, `/teachers`,
 not under `/admin`) with their own inline `requireOwner(req, res)` helper on
@@ -148,6 +154,17 @@ boundary, the UI hiding is cosmetic on top of it.
 **Middleware stack** (`backend/src/app.js`, in order): `helmet` (CSP/COEP disabled — this is a JSON API, no server-rendered HTML), `express-rate-limit` (300 req/min per IP, generous enough for 5s chat polling), `cors` (origin allowlist from `FRONTEND_URL`, comma-separated), `express.json()`. App trusts the first proxy hop (`trust proxy = 1`) for correct client IPs behind Caddy (the VPS's reverse proxy).
 
 **Error handling is centralized.** A single error-handling middleware at the end of `app.js` maps `multer` file-upload errors, `err.status === 400`, and malformed-JSON body errors to `{ error: '<Russian message>' }` with the right status; anything else logs server-side and returns a generic 500. Don't add per-route try/catch that duplicates this — let errors propagate (routes use async handlers that funnel into it) unless a route needs a specific status/message.
+
+**Order chat self-service (2026-08-28).** Both parties on an `in_progress` order now get a mutual-consent action bar in the order chat (`ebu.gubkin`'s `OrderActionsBar.tsx`, replacing the earlier separate `PriceChangeBar`/`CancelOrderBar`), covering price change, order cancellation, completion confirmation, and dispute — all four now also post a system message into the chat (`sender_id: null`), not just show in a UI panel.
+- **Price change** — `orders.pending_amount`/`pending_amount_proposed_by`/`pending_amount_proposed_at` (migration `20260827200000_order_price_change.sql`) hold one active proposal at a time; `POST /orders/:id/propose-price` → `/accept`|`/decline`|`/cancel`. `pending_amount` is stored canonically as the **executor's payout** (pre-commission), same convention as `order_applications.proposed_amount` — but the customer always enters/sees the **charge** (with commission) and the executor always enters/sees the **payout** (without it); the route converts based on which role is calling. Accepting recomputes `reserved_amount` via the existing `chargeWithCommission`/`payoutFromCharge` helpers and debits/credits only the **diff** against what's already reserved (mirrors the `awaiting_topup` top-up logic in `/:id/topup`), blocking accept on insufficient customer balance rather than partially applying it.
+- **Mutual cancel** — `orders.cancel_requested_by`/`cancel_requested_at` (migration `20260828120000_order_mutual_cancel.sql`), same one-active-proposal shape; `POST /orders/:id/cancel-request` → `/accept`|`/decline`|`/cancel`. Full 1:1 refund of `reserved_amount` to the customer on accept, same as the existing open-order cancel path — not to be confused with disputes, which are for disagreement rather than mutual "let's just stop."
+- A price proposal and a cancel request are mutually exclusive on one order (each route 400s if the other is pending) to avoid the two interacting.
+- System messages for price events encode both numbers as JSON (`SYS_PRICE::{"event":...,"payout":...,"charge":...}`, see `priceEventMessage` in `routes/orders.js`) — the frontend (`ChatWindow.tsx`'s `renderPriceEvent`) picks which number to render based on the *viewer's* role, not the proposer's, for the same reason as above (a flat string couldn't be correct for both sides at once).
+
+**Market category self-service (2026-08-28).** Creating an order or listing (`POST /orders`, `PATCH /orders/:id`, `POST /listings`) with a `category` that doesn't case-insensitively match an existing `market_categories.name` no longer silently free-texts it — the order/listing is still created immediately with whatever the user typed (unchanged), but `utils/marketCategories.js`'s `maybeRequestNewCategory` also fires a moderation flow in parallel:
+- If `DEEPSEEK_API_KEY` is set, a synchronous DeepSeek call (`callDeepSeek`, given the new name + existing category names) returns `approve`/`reject`/`unsure`. `approve` creates the real `market_categories` row immediately; `reject` reassigns the originating order/listing's `category` to the `'other'` ("Другое") fallback and leaves a rejected `market_category_requests` row; `unsure` (or no API key at all) falls through to manual review, same as before AI was added.
+- `market_category_requests` (migration `20260828130000_market_category_requests.sql`) tracks `target_order_id` **or** `target_listing_id` (whichever originated it), `requested_by`, `status`, `reject_reason`. No RLS policies (service-role only, same pattern as `order-attachments`/`schedule_warmup_state`).
+- Admin routes: `GET /admin/market-categories/requests?status=`, `POST /admin/market-categories/requests/:id/approve`, `POST .../reject` (body `{ reassign_to_id, reason }` — on reject, moves the target order/listing's `category` to the chosen existing category's name). **Deliberately not owner-gated** — any admin can moderate category requests, unlike creating/renaming/deleting a category directly (still owner-only, see "Two admin tiers" above). Frontend UI lives in `ebu.gubkin`'s `Admin/ChatMod.tsx` (the "Модерация" page), not `Admin/Settings.tsx`.
 
 ## Known spec deviations
 

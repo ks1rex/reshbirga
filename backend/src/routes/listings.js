@@ -8,6 +8,8 @@ const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
 const { marketplaceCommissionPct, chargeWithCommission, round2 } = require('../utils/commission');
 const { notifyUser } = require('../utils/notify');
+const { maybeRequestNewCategory } = require('../utils/marketCategories');
+const { deleteUrlsIfUnused } = require('../utils/mediaCleanup');
 
 const router = Router();
 
@@ -113,6 +115,9 @@ router.post('/', auth, isBanned, async (req, res) => {
     is_active: true,
   }).select().single();
   if (error) return serverError(res, error);
+
+  maybeRequestNewCategory({ category, listingId: listing.id, userId: req.userId }).catch(() => {});
+
   res.status(201).json(listing);
 });
 
@@ -179,7 +184,7 @@ router.get('/:id', auth, async (req, res) => {
 
 // ── PATCH /listings/:id ───────────────────────────────────────────────────────
 router.patch('/:id', auth, isBanned, async (req, res) => {
-  const { data: listing } = await supabase.from('listings').select('owner_id').eq('id', req.params.id).single();
+  const { data: listing } = await supabase.from('listings').select('owner_id, cover_url, attachments').eq('id', req.params.id).single();
   if (!listing) return res.status(404).json({ error: 'Услуга не найдена' });
   if (listing.owner_id !== req.userId) return res.status(403).json({ error: 'Forbidden' });
 
@@ -205,6 +210,11 @@ router.patch('/:id', auth, isBanned, async (req, res) => {
     .eq('id', req.params.id)
     .select().single();
   if (error) return serverError(res, error);
+
+  const oldUrls = [listing.cover_url, ...(listing.attachments ?? []).map(a => a?.url)];
+  const newUrls = new Set([updated.cover_url, ...(updated.attachments ?? []).map(a => a?.url)]);
+  deleteUrlsIfUnused(oldUrls.filter(u => u && !newUrls.has(u))).catch(() => {});
+
   res.json(updated);
 });
 
@@ -235,12 +245,13 @@ router.patch('/:id/toggle', auth, isBanned, async (req, res) => {
 // её данные (см. POST /:id/order) и на строку услуги не ссылается — уже идущие
 // сделки, чаты и отзывы не задеваются.
 router.delete('/:id', auth, isBanned, async (req, res) => {
-  const { data: listing } = await supabase.from('listings').select('owner_id').eq('id', req.params.id).single();
+  const { data: listing } = await supabase.from('listings').select('owner_id, cover_url, attachments').eq('id', req.params.id).single();
   if (!listing) return res.status(404).json({ error: 'Услуга не найдена' });
   if (listing.owner_id !== req.userId) return res.status(403).json({ error: 'Forbidden' });
 
   const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
   if (error) return serverError(res, error, 'listing:delete');
+  deleteUrlsIfUnused([listing.cover_url, ...(listing.attachments ?? []).map(a => a?.url)]).catch(() => {});
   res.json({ success: true });
 });
 

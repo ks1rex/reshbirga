@@ -480,27 +480,27 @@ async function run() {
     await setBalance(execId, 5000);
     const balBefore = await getBalance(execId);
 
-    // Минимумы по способу: СБП — 500 ₽, карта — 4000 ₽
+    // Минимум — 500 ₽ (единственный способ теперь — номер телефона/СБП)
     const rMin = await api('POST', '/wallet/withdrawals', execToken,
-      { amount: 400, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'deposited' });
-    if (rMin.status === 400) ok(13, 'Withdrawal below СБП minimum (400 < 500) → 400');
-    else fail(13, 'Expected 400 below СБП minimum', `status=${rMin.status} ${JSON.stringify(rMin.body)}`);
+      { amount: 400, phone_number: '+79001234567', source_balance: 'deposited' });
+    if (rMin.status === 400) ok(13, 'Withdrawal below minimum (400 < 500) → 400');
+    else fail(13, 'Expected 400 below minimum', `status=${rMin.status} ${JSON.stringify(rMin.body)}`);
 
-    const rCardMin = await api('POST', '/wallet/withdrawals', execToken,
-      { amount: 1000, card_number: '4111111111111111', withdrawal_method: 'card', source_balance: 'deposited' });
-    if (rCardMin.status === 400) ok(13, 'Withdrawal below card minimum (1000 < 4000) → 400');
-    else fail(13, 'Expected 400 below card minimum', `status=${rCardMin.status} ${JSON.stringify(rCardMin.body)}`);
+    const rBadPhone = await api('POST', '/wallet/withdrawals', execToken,
+      { amount: 500, phone_number: 'not-a-phone', source_balance: 'deposited' });
+    if (rBadPhone.status === 400) ok(13, 'Withdrawal with invalid phone_number → 400');
+    else fail(13, 'Expected 400 for invalid phone', `status=${rBadPhone.status} ${JSON.stringify(rBadPhone.body)}`);
 
     // Вывод с «заработанного», когда там пусто, — отказ даже при полном общем балансе
     const rEmptyBucket = await api('POST', '/wallet/withdrawals', execToken,
-      { amount: 500, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'earned' });
+      { amount: 500, phone_number: '+79001234567', source_balance: 'earned' });
     if (rEmptyBucket.status === 400 && rEmptyBucket.body.code === 'INSUFFICIENT_BUCKET_BALANCE')
       ok(13, 'Withdrawal from empty earned_balance → 400 INSUFFICIENT_BUCKET_BALANCE (смешанный вывод запрещён)');
     else
       fail(13, 'Expected 400 INSUFFICIENT_BUCKET_BALANCE', `status=${rEmptyBucket.status} ${JSON.stringify(rEmptyBucket.body)}`);
 
     const r = await api('POST', '/wallet/withdrawals', execToken,
-      { amount: 500, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'deposited' });
+      { amount: 500, phone_number: '+79001234567', source_balance: 'deposited' });
     if (r.status === 201 && r.body.id) {
       withdrawalId = r.body.id;
       const balAfterReq = await getBalance(execId);
@@ -517,15 +517,15 @@ async function run() {
       else
         fail(13, 'Admin confirm withdrawal', `status=${rc.status} ${JSON.stringify(rc.body)}`);
 
-      // Withdrawal transaction should hold 10% commission in platform_profit (amount stays full)
+      // Withdrawal transaction should hold 15% commission in platform_profit (amount stays full)
       const { data: wTx } = await adminSupabase
         .from('transactions')
         .select('amount, platform_profit')
         .eq('user_id', execId).eq('type', 'withdrawal')
         .order('created_at', { ascending: false }).limit(1).single();
-      const expectedProfit = Math.round(500 * 0.1 * 100) / 100;
+      const expectedProfit = Math.round(500 * 0.15 * 100) / 100;
       if (wTx && Math.abs(parseFloat(wTx.amount) - 500) < 0.01 && Math.abs(parseFloat(wTx.platform_profit ?? 0) - expectedProfit) < 0.01)
-        ok(13, `Withdrawal transaction: amount=${wTx.amount} ₽, platform_profit=${wTx.platform_profit} ₽ (10% с занесённого)`);
+        ok(13, `Withdrawal transaction: amount=${wTx.amount} ₽, platform_profit=${wTx.platform_profit} ₽ (15% с занесённого)`);
       else
         fail(13, 'Withdrawal commission mismatch', JSON.stringify(wTx));
     } else {
@@ -540,7 +540,7 @@ async function run() {
     await setBalance(execId, 1000, 'earned');
     const balBefore = await getBalance(execId);
     const rw = await api('POST', '/wallet/withdrawals', execToken,
-      { amount: 500, card_number: '4111111111111111', withdrawal_method: 'sbp', source_balance: 'earned' });
+      { amount: 500, phone_number: '+79001234567', source_balance: 'earned' });
     if (rw.status !== 201) { fail(14, 'Create withdrawal for reject', JSON.stringify(rw.body)); }
     else {
       const wid = rw.body.id;

@@ -20,7 +20,7 @@ router.get('/public/commissions', auth, async (req, res) => {
     return Number.isFinite(pct) ? pct : fallback;
   };
   res.json({
-    withdrawal_commission_pct: num('withdrawal_commission_pct', 10),
+    withdrawal_commission_pct: num('withdrawal_commission_pct', 15),
     marketplace_commission_pct: num('marketplace_commission_pct', 10),
   });
 });

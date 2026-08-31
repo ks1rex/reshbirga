@@ -16,6 +16,8 @@ const { withIsVip } = require('../utils/vip');
 const { sortFeed } = require('../utils/feedSort');
 const { marketplaceCommissionPct, chargeWithCommission, payoutFromCharge, round2 } = require('../utils/commission');
 const { notifyUser } = require('../utils/notify');
+const { maybeRequestNewCategory } = require('../utils/marketCategories');
+const { closeOrderConversation } = require('../utils/closeConversation');
 
 const router = Router();
 const upload = makeUploader();
@@ -192,6 +194,8 @@ router.post('/', auth, isBanned, async (req, res) => {
     type: 'order_payment', amount: reserved, status: 'completed',
   });
 
+  maybeRequestNewCategory({ category, orderId: order.id, userId: req.userId }).catch(() => {});
+
   res.status(201).json(order);
 });
 
@@ -258,6 +262,10 @@ router.patch('/:id', auth, isBanned, async (req, res) => {
       user_id: req.userId, order_id: order.id,
       type: diff > 0 ? 'order_payment' : 'order_refund_excess', amount: Math.abs(diff), status: 'completed',
     });
+  }
+
+  if (category && category !== order.category) {
+    maybeRequestNewCategory({ category, orderId: order.id, userId: req.userId }).catch(() => {});
   }
 
   res.json(updated);
@@ -540,6 +548,7 @@ router.post('/:id/cancel', auth, isBanned, async (req, res) => {
   const { data: cancelled, error: cancelErr } = await q.select('id');
   if (cancelErr) return serverError(res, cancelErr, 'cancel:order-update');
   if (!cancelled?.length) return res.status(409).json({ error: 'Заказ уже не может быть отменён' });
+  closeOrderConversation(orderId).catch(() => {});
 
   // Full 1:1 refund of the reserved amount — no commission on orders
   await supabase.rpc('add_wallet_balance', { p_user_id: order.customer_id, p_amount: refundAmount });
@@ -590,6 +599,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
       .select('id');
     if (orderErr) return serverError(res, orderErr, 'confirm:complete');
     if (!completed?.length) return res.json({ status: 'completed' }); // already done
+    closeOrderConversation(order.id).catch(() => {});
 
     // Payout executor immediately via balance — заработанное, выводится без
     // комиссии. Комиссия биржи (разница между списанным с заказчика и этой
@@ -626,6 +636,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // Fire-and-forget AI chat scan after order completion
     runAIChatCheck(order.id).catch(() => {});
 
+    await postSystemMessage(order, `✅ Заказ завершён — обе стороны подтвердили выполнение. Исполнителю начислено ${payoutAmount} ₽.`);
+
     notifyUser(order.executor_id, 'order_completed', 'Заказ завершён, деньги начислены',
       `${order.title ? `«${order.title}» — ` : ''}начислено ${payoutAmount} ₽`, `/market/orders/${order.id}`);
 
@@ -651,6 +663,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
   }).eq('id', order.id);
   if (orderErr) return serverError(res, orderErr);
 
+  await postSystemMessage(order, `☑️ ${isCustomer ? 'Заказчик' : 'Исполнитель'} подтвердил выполнение работы. Ждём подтверждения второй стороны.`);
+
   // Исполнитель отметил заказ выполненным — заказчику нужно подтвердить со
   // своей стороны (иначе завершится автоматически по дедлайну, см.
   // utils/autoConfirm.js). Обратное (заказчик подтвердил первым) уведомлять
@@ -662,6 +676,290 @@ router.post('/:id/confirm', auth, async (req, res) => {
   }
 
   res.json({ status: 'awaiting_confirmation', confirmation_deadline: deadline });
+});
+
+// ── PRICE CHANGE (mutual consent, mid-work renegotiation) ─────────────────────
+//
+// Один заказ — одно текущее предложение (orders.pending_amount /
+// _proposed_by / _proposed_at). Принятие меняет final_amount тем же
+// способом, что и topup выше: считаем новый резерв (цена + комиссия),
+// доплачиваем или возвращаем разницу на баланс заказчика. Доступно только
+// пока заказ in_progress — после того как кто-то отметил его выполненным,
+// цену уже поздно пересматривать (открывайте спор).
+
+async function getOrCreateOrderConversation(order) {
+  let { data: conv } = await supabase.from('conversations')
+    .select('id').eq('order_id', order.id).eq('type', 'order_chat').maybeSingle();
+  if (conv) return conv.id;
+  const { data: created, error } = await supabase.from('conversations')
+    .insert({ type: 'order_chat', order_id: order.id }).select('id').single();
+  if (error) return null;
+  await supabase.from('conversation_participants').insert([
+    { conversation_id: created.id, user_id: order.customer_id, role: 'customer' },
+    { conversation_id: created.id, user_id: order.executor_id, role: 'executor' },
+  ]);
+  return created.id;
+}
+
+async function postSystemMessage(order, content) {
+  const conversationId = await getOrCreateOrderConversation(order);
+  if (!conversationId) return;
+  await supabase.from('messages').insert({ conversation_id: conversationId, sender_id: null, content, is_contact_info: false });
+}
+
+// Заказчик и исполнитель видят разные числа для одной и той же цены (см.
+// PRICE CHANGE ниже) — обычным текстом это не отобразить одинаково честно
+// для обеих сторон. Кодируем событие как JSON с префиксом, фронтенд
+// (ChatWindow.tsx) распознаёт префикс и рендерит текст под роль зрителя;
+// всё остальное (в т.ч. старые сообщения без префикса) остаётся обычным
+// текстом.
+function priceEventMessage(event, fields) {
+  return `SYS_PRICE::${JSON.stringify({ event, ...fields })}`;
+}
+
+router.post('/:id/propose-price', auth, isBanned, async (req, res) => {
+  const orderId = req.params.id;
+  const { amount } = req.body;
+  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, status, title, cancel_requested_by').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const isCustomer = order.customer_id === req.userId;
+  const isExecutor  = order.executor_id === req.userId;
+  if (!isCustomer && !isExecutor) return res.status(403).json({ error: 'Forbidden' });
+  if (order.status !== 'in_progress') return res.status(400).json({ error: 'Изменение цены доступно только для заказа в работе' });
+  if (order.cancel_requested_by) return res.status(400).json({ error: 'Сначала закройте активный запрос на отмену заказа' });
+
+  const amt = parseFloat(amount);
+  if (!amount || isNaN(amt) || amt <= 0) return res.status(400).json({ error: 'Укажите новую цену' });
+  if (amt > 1000000) return res.status(400).json({ error: 'Сумма слишком большая' });
+
+  // Заказчик всегда вводит/видит цену С комиссией биржи (то, что реально
+  // спишется), исполнитель — БЕЗ неё (то, что реально получит). pending_amount
+  // на заказе хранится в каноническом виде — как сумма исполнителю, — а на
+  // входе/выходе конвертируется под роль конкретного человека, чтобы никто
+  // не должен был сам считать комиссию.
+  const pct          = await marketplaceCommissionPct();
+  const payoutAmount = round2(isCustomer ? payoutFromCharge(round2(amt), pct) : amt);
+  const chargeAmount = isCustomer ? round2(amt) : chargeWithCommission(round2(amt), pct);
+
+  const { data: updated, error } = await supabase.from('orders')
+    .update({ pending_amount: payoutAmount, pending_amount_proposed_by: req.userId, pending_amount_proposed_at: new Date().toISOString() })
+    .eq('id', orderId).eq('status', 'in_progress').select('id').single();
+  if (error) return serverError(res, error, 'propose-price');
+  if (!updated) return res.status(409).json({ error: 'Заказ уже не в работе' });
+
+  const otherParty = isCustomer ? order.executor_id : order.customer_id;
+  await postSystemMessage(order, priceEventMessage('proposed', {
+    by: isCustomer ? 'customer' : 'executor',
+    payout: payoutAmount, charge: chargeAmount,
+  }));
+  // Уведомление — второй стороне, её собственными единицами: заказчику
+  // (если предлагал исполнитель) — с комиссией, исполнителю — без.
+  const otherPartyAmount = isCustomer ? payoutAmount : chargeAmount;
+  notifyUser(otherParty, 'price_change_proposed', 'Предложена новая цена заказа',
+    order.title ? `«${order.title}» — ${otherPartyAmount} ₽` : `Новая цена: ${otherPartyAmount} ₽`, `/market/orders/${orderId}`);
+
+  res.json({ pending_amount: payoutAmount, pending_amount_proposed_by: req.userId });
+});
+
+router.post('/:id/propose-price/cancel', auth, async (req, res) => {
+  const orderId = req.params.id;
+  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, pending_amount, pending_amount_proposed_by').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.pending_amount == null) return res.status(400).json({ error: 'Нет активного предложения' });
+  if (order.pending_amount_proposed_by !== req.userId) return res.status(403).json({ error: 'Отменить может только автор предложения' });
+
+  await supabase.from('orders').update({ pending_amount: null, pending_amount_proposed_by: null, pending_amount_proposed_at: null }).eq('id', orderId);
+  await postSystemMessage(order, priceEventMessage('cancelled', {}));
+  res.json({ success: true });
+});
+
+router.post('/:id/propose-price/decline', auth, async (req, res) => {
+  const orderId = req.params.id;
+  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, pending_amount, pending_amount_proposed_by').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const isCustomer = order.customer_id === req.userId;
+  const isExecutor  = order.executor_id === req.userId;
+  if (!isCustomer && !isExecutor) return res.status(403).json({ error: 'Forbidden' });
+  if (order.pending_amount == null) return res.status(400).json({ error: 'Нет активного предложения' });
+  if (order.pending_amount_proposed_by === req.userId) return res.status(400).json({ error: 'Нельзя отклонить своё же предложение — отмените его' });
+
+  // Автор предложения мог быть заказчиком — уведомляем его цифрой с
+  // комиссией, а не канонической (без) суммой исполнителя.
+  const proposerIsCustomer = order.pending_amount_proposed_by === order.customer_id;
+  let proposerAmount = order.pending_amount;
+  if (proposerIsCustomer) {
+    const pct = await marketplaceCommissionPct();
+    proposerAmount = chargeWithCommission(order.pending_amount, pct);
+  }
+
+  await supabase.from('orders').update({ pending_amount: null, pending_amount_proposed_by: null, pending_amount_proposed_at: null }).eq('id', orderId);
+  await postSystemMessage(order, priceEventMessage('declined', { by: isCustomer ? 'customer' : 'executor' }));
+  notifyUser(order.pending_amount_proposed_by, 'price_change_declined', 'Новую цену отклонили', `Предложение ${proposerAmount} ₽ отклонено`, `/market/orders/${orderId}`);
+  res.json({ success: true });
+});
+
+router.post('/:id/propose-price/accept', auth, isBanned, async (req, res) => {
+  const orderId = req.params.id;
+  const { data: order } = await supabase.from('orders').select('*').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const isCustomer = order.customer_id === req.userId;
+  const isExecutor  = order.executor_id === req.userId;
+  if (!isCustomer && !isExecutor) return res.status(403).json({ error: 'Forbidden' });
+  if (order.status !== 'in_progress') return res.status(400).json({ error: 'Изменение цены доступно только для заказа в работе' });
+  if (order.pending_amount == null) return res.status(400).json({ error: 'Нет активного предложения' });
+  if (order.pending_amount_proposed_by === req.userId) return res.status(400).json({ error: 'Нельзя принять своё же предложение' });
+
+  const pct          = await marketplaceCommissionPct();
+  const newFinal      = round2(order.pending_amount);
+  const newCharge     = chargeWithCommission(newFinal, pct);
+  const newCommission = round2(newCharge - newFinal);
+  const reserved      = round2(parseFloat(order.reserved_amount));
+  const diff           = round2(newCharge - reserved);
+
+  if (diff > 0) {
+    const { data: profile } = await supabase.from('profiles').select('balance').eq('id', order.customer_id).single();
+    const balance = parseFloat(profile?.balance ?? 0);
+    if (balance < diff) return res.status(400).json({ error: 'insufficient_balance', required: diff, balance });
+    const { data: deducted } = await supabase.rpc('try_subtract_wallet_balance', { p_user_id: order.customer_id, p_amount: diff });
+    if (!deducted) return res.status(400).json({ error: 'insufficient_balance', required: diff, balance });
+  } else if (diff < 0) {
+    await supabase.rpc('add_wallet_balance', { p_user_id: order.customer_id, p_amount: -diff });
+  }
+
+  // pending_amount в WHERE — оптимистическая блокировка: если предложение
+  // успели отменить/переотправить между чтением и записью, апдейт не найдёт
+  // строку и мы откатим списание ниже.
+  const { data: updated, error: orderErr } = await supabase.from('orders')
+    .update({
+      final_amount: newFinal, commission_amount: newCommission, reserved_amount: newCharge,
+      pending_amount: null, pending_amount_proposed_by: null, pending_amount_proposed_at: null,
+    })
+    .eq('id', orderId).eq('status', 'in_progress').eq('pending_amount', order.pending_amount)
+    .select('id');
+
+  if (orderErr || !updated?.length) {
+    if (diff > 0) await supabase.rpc('add_wallet_balance', { p_user_id: order.customer_id, p_amount: diff });
+    else if (diff < 0) await supabase.rpc('try_subtract_wallet_balance', { p_user_id: order.customer_id, p_amount: -diff });
+    if (orderErr) return serverError(res, orderErr, 'propose-price:accept');
+    return res.status(409).json({ error: 'Предложение уже неактуально' });
+  }
+
+  if (diff !== 0) {
+    await supabase.from('transactions').insert({
+      user_id: order.customer_id, order_id: orderId,
+      type: diff > 0 ? 'order_payment' : 'order_refund_excess', amount: Math.abs(diff), status: 'completed',
+    });
+  }
+
+  await postSystemMessage(order, priceEventMessage('accepted', { payout: newFinal, charge: newCharge }));
+  // Автору предложения — его собственной цифрой (заказчику с комиссией,
+  // исполнителю без).
+  const proposerIsCustomer = order.pending_amount_proposed_by === order.customer_id;
+  const proposerAmount = proposerIsCustomer ? newCharge : newFinal;
+  notifyUser(order.pending_amount_proposed_by, 'price_change_accepted', 'Новая цена принята',
+    order.title ? `«${order.title}» — теперь ${proposerAmount} ₽` : `Новая цена: ${proposerAmount} ₽`, `/market/orders/${orderId}`);
+
+  res.json({ status: 'ok', final_amount: newFinal, reserved_amount: newCharge });
+});
+
+// ── MUTUAL CANCEL (order in progress, both sides agree to call it off) ───────
+//
+// Тот же паттерн "одно активное предложение на заказе", что и у изменения
+// цены — cancel_requested_by/_at вместо pending_amount. Полный возврат
+// заказчику зарезервированной суммы, исполнитель ничего не получает — так же,
+// как при обычной отмене открытого заказа. Если стороны расходятся во
+// мнениях — на это есть спор, тут только согласованный сценарий.
+
+router.post('/:id/cancel-request', auth, isBanned, async (req, res) => {
+  const orderId = req.params.id;
+  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, status, title, pending_amount').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const isCustomer = order.customer_id === req.userId;
+  const isExecutor  = order.executor_id === req.userId;
+  if (!isCustomer && !isExecutor) return res.status(403).json({ error: 'Forbidden' });
+  if (order.status !== 'in_progress') return res.status(400).json({ error: 'Отмена по согласию доступна только для заказа в работе' });
+  if (order.pending_amount != null) return res.status(400).json({ error: 'Сначала закройте активное предложение цены' });
+
+  const { data: updated, error } = await supabase.from('orders')
+    .update({ cancel_requested_by: req.userId, cancel_requested_at: new Date().toISOString() })
+    .eq('id', orderId).eq('status', 'in_progress').is('cancel_requested_by', null).select('id').single();
+  if (error) return serverError(res, error, 'cancel-request');
+  if (!updated) return res.status(409).json({ error: 'Заказ уже не в работе или отмена уже запрошена' });
+
+  const otherParty = isCustomer ? order.executor_id : order.customer_id;
+  await postSystemMessage(order, `⚠️ ${isCustomer ? 'Заказчик' : 'Исполнитель'} предложил отменить заказ по согласию сторон. Ждём подтверждения второй стороны.`);
+  notifyUser(otherParty, 'cancel_requested', 'Предложена отмена заказа',
+    order.title ? `«${order.title}»` : 'Предложена отмена заказа', `/market/orders/${orderId}`);
+
+  res.json({ cancel_requested_by: req.userId });
+});
+
+router.post('/:id/cancel-request/cancel', auth, async (req, res) => {
+  const orderId = req.params.id;
+  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, cancel_requested_by').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.cancel_requested_by == null) return res.status(400).json({ error: 'Нет активного запроса на отмену' });
+  if (order.cancel_requested_by !== req.userId) return res.status(403).json({ error: 'Отменить запрос может только его автор' });
+
+  await supabase.from('orders').update({ cancel_requested_by: null, cancel_requested_at: null }).eq('id', orderId);
+  await postSystemMessage(order, '↩️ Предложение отменить заказ отозвано автором.');
+  res.json({ success: true });
+});
+
+router.post('/:id/cancel-request/decline', auth, async (req, res) => {
+  const orderId = req.params.id;
+  const { data: order } = await supabase.from('orders').select('id, customer_id, executor_id, cancel_requested_by').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const isCustomer = order.customer_id === req.userId;
+  const isExecutor  = order.executor_id === req.userId;
+  if (!isCustomer && !isExecutor) return res.status(403).json({ error: 'Forbidden' });
+  if (order.cancel_requested_by == null) return res.status(400).json({ error: 'Нет активного запроса на отмену' });
+  if (order.cancel_requested_by === req.userId) return res.status(400).json({ error: 'Нельзя отклонить свой же запрос — отзовите его' });
+
+  await supabase.from('orders').update({ cancel_requested_by: null, cancel_requested_at: null }).eq('id', orderId);
+  await postSystemMessage(order, `❌ ${isCustomer ? 'Заказчик' : 'Исполнитель'} отклонил предложение отменить заказ — работа продолжается.`);
+  notifyUser(order.cancel_requested_by, 'cancel_declined', 'Отмену заказа отклонили',
+    order.title ? `«${order.title}»` : undefined, `/market/orders/${orderId}`);
+  res.json({ success: true });
+});
+
+router.post('/:id/cancel-request/accept', auth, isBanned, async (req, res) => {
+  const orderId = req.params.id;
+  const { data: order } = await supabase.from('orders')
+    .select('id, customer_id, executor_id, status, reserved_amount, cancel_requested_by, title').eq('id', orderId).single();
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const isCustomer = order.customer_id === req.userId;
+  const isExecutor  = order.executor_id === req.userId;
+  if (!isCustomer && !isExecutor) return res.status(403).json({ error: 'Forbidden' });
+  if (order.status !== 'in_progress') return res.status(400).json({ error: 'Отмена по согласию доступна только для заказа в работе' });
+  if (order.cancel_requested_by == null) return res.status(400).json({ error: 'Нет активного запроса на отмену' });
+  if (order.cancel_requested_by === req.userId) return res.status(400).json({ error: 'Нельзя принять свой же запрос' });
+
+  const refundAmount = round2(parseFloat(order.reserved_amount));
+
+  const { data: cancelled, error: orderErr } = await supabase.from('orders')
+    .update({ status: 'cancelled', cancel_requested_by: null, cancel_requested_at: null })
+    .eq('id', orderId).eq('status', 'in_progress').eq('cancel_requested_by', order.cancel_requested_by)
+    .select('id');
+  if (orderErr) return serverError(res, orderErr, 'cancel-request:accept');
+  if (!cancelled?.length) return res.status(409).json({ error: 'Запрос на отмену уже неактуален' });
+  closeOrderConversation(orderId).catch(() => {});
+
+  await supabase.rpc('add_wallet_balance', { p_user_id: order.customer_id, p_amount: refundAmount });
+  await supabase.from('transactions').insert({
+    user_id: order.customer_id, order_id: orderId,
+    type: 'order_cancel_refund', amount: refundAmount, status: 'completed',
+  });
+
+  await postSystemMessage(order, `✅ Заказ отменён по согласию сторон. Заказчику возвращено ${refundAmount} ₽.`);
+  notifyUser(order.cancel_requested_by, 'cancel_accepted', 'Отмена заказа подтверждена',
+    order.title ? `«${order.title}»` : undefined, `/market/orders/${orderId}`);
+
+  res.json({ status: 'cancelled', refunded: refundAmount });
 });
 
 // ── OPEN DISPUTE ──────────────────────────────────────────────────────────────
@@ -689,7 +987,10 @@ router.post('/:id/dispute', auth, isBanned, async (req, res) => {
 
   sendTelegram(`⚠️ Новый спор\nЗаказ: ${order.title ?? order.id}\nПричина: ${reason.trim().slice(0, 200)}`);
 
-  const otherParty = order.customer_id === req.userId ? order.executor_id : order.customer_id;
+  const isCustomer = order.customer_id === req.userId;
+  await postSystemMessage(order, `⚠️ ${isCustomer ? 'Заказчик' : 'Исполнитель'} открыл спор по заказу. Причина: ${reason.trim()}`);
+
+  const otherParty = isCustomer ? order.executor_id : order.customer_id;
   notifyUser(otherParty, 'dispute_opened', 'Открыт спор по заказу',
     order.title ? `«${order.title}»` : 'По одному из ваших заказов открыт спор', `/market/orders/${order.id}`);
 

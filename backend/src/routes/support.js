@@ -3,6 +3,7 @@ const auth = require('../middleware/auth');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
 const { sendTelegram } = require('../utils/telegramNotify');
+const { closeTicketConversation } = require('../utils/closeConversation');
 
 const router = Router();
 router.use(auth);
@@ -142,6 +143,7 @@ router.patch('/tickets/:id/close', async (req, res) => {
     .neq('status', 'closed');
 
   if (error) return serverError(res, error);
+  closeTicketConversation(req.params.id).catch(() => {});
   res.json({ success: true });
 });
 

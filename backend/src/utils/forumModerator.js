@@ -28,6 +28,8 @@ function checkRegex(content) {
   return { blocked: false };
 }
 
+const SPAM_DUPLICATE_THRESHOLD = 10; // было 3 — слишком легко ловило обычных пользователей
+
 async function checkSpam(content, userId) {
   const since = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   const { data } = await supabase
@@ -36,10 +38,10 @@ async function checkSpam(content, userId) {
     .eq('author_id', userId)
     .gte('created_at', since)
     .order('created_at', { ascending: false })
-    .limit(10);
+    .limit(20);
   if (!data?.length) return false;
   const norm = content.trim().toLowerCase();
-  return data.filter(p => p.content.trim().toLowerCase() === norm).length >= 3;
+  return data.filter(p => p.content.trim().toLowerCase() === norm).length >= SPAM_DUPLICATE_THRESHOLD;
 }
 
 // Returns { blocked, reason } — call before inserting the post.

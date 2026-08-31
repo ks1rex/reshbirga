@@ -12,6 +12,7 @@ const { hideExcessForUser, baseListingLimit } = require('../utils/vipExpiry');
 const scheduleWarmup = require('../jobs/scheduleWarmup');
 const { notifyUser } = require('../utils/notify');
 const { round2 } = require('../utils/commission');
+const { closeOrderConversation, closeTicketConversation } = require('../utils/closeConversation');
 
 const router = Router();
 router.use(auth, adminMiddleware);
@@ -19,8 +20,12 @@ router.use(auth, adminMiddleware);
 // Owner-only sections — everything not in the restricted admin's allowed set
 // (споры/форум/заказы/модерация/поддержка/пользователи/2FA-настройки).
 // Path-prefix gate, same pattern as the base auth/adminMiddleware above.
+// Модерация категорий (заявки/approve/reject) намеренно оставлена доступной
+// и рядовым админам, не только владельцам — поэтому /market-categories
+// целиком убран из этого списка, а requireOwner навешан точечно на CRUD-
+// роуты самих категорий (создать/переименовать/удалить) ниже.
 router.use(
-  ['/ledger', '/stats', '/deposits', '/withdrawals', '/settings', '/admin-settings', '/finance', '/vip', '/schedule-warmup', '/market-categories'],
+  ['/ledger', '/stats', '/deposits', '/withdrawals', '/settings', '/admin-settings', '/finance', '/vip', '/schedule-warmup'],
   adminMiddleware.requireOwner,
 );
 
@@ -153,6 +158,7 @@ router.post('/disputes/:id/resolve', async (req, res) => {
       type: 'dispute_refund_customer', amount: refAmt, status: 'completed',
     });
   }
+  closeOrderConversation(order.id).catch(() => {});
 
   // Optional bans — same rank check as PATCH /admin/users/:id: a regular
   // admin can't ban another admin/owner this way either.
@@ -192,6 +198,7 @@ router.patch('/support/tickets/:id/close', async (req, res) => {
     .eq('id', req.params.id)
     .neq('status', 'closed');
   if (error) return serverError(res, error);
+  closeTicketConversation(req.params.id).catch(() => {});
   res.json({ success: true });
 });
 
@@ -560,14 +567,14 @@ router.post('/deposits/:id/reject', async (req, res) => {
 // ─── Withdrawals ─────────────────────────────────────────────
 
 // Комиссия за вывод зависит от источника: занесённые деньги — ставка из
-// admin_settings (10%), заработанные на бирже — 0%. Одна точка правды на
+// admin_settings (15%), заработанные на бирже — 0%. Одна точка правды на
 // бэкенде, фронт (админка и кошелёк) только показывает результат.
 async function withdrawalCommissionPct(sourceBalance) {
   if (sourceBalance === 'earned') return 0;
   const { data } = await supabase
     .from('admin_settings').select('value').eq('key', 'withdrawal_commission_pct').maybeSingle();
   const pct = parseFloat(data?.value);
-  return Number.isFinite(pct) ? pct : 10;
+  return Number.isFinite(pct) ? pct : 15;
 }
 
 // GET /admin/withdrawals?status=pending
@@ -575,7 +582,7 @@ router.get('/withdrawals', async (req, res) => {
   const { status } = req.query;
   let q = supabase
     .from('withdrawal_requests')
-    .select('id, amount, card_number, withdrawal_method, source_balance, status, admin_comment, created_at, user:profiles!withdrawal_requests_user_id_fkey(id, nickname)')
+    .select('id, amount, phone_number, source_balance, status, admin_comment, created_at, user:profiles!withdrawal_requests_user_id_fkey(id, nickname)')
     .order('created_at', { ascending: false });
   if (status) q = q.eq('status', status);
   const { data, error } = await q;
@@ -617,7 +624,7 @@ router.post('/withdrawals/:id/confirm', async (req, res) => {
   // payout to the user (amount × (1 − pct)) happens manually by the admin/bank —
   // the reserved full `amount` was already deducted at withdrawal creation, and
   // platform_profit here just records the commission for the finance summary.
-  // Ставка плоская и зависит только от источника: занесённый — 10%,
+  // Ставка плоская и зависит только от источника: занесённый — 15%,
   // заработанный — 0% (прогрессии по уровню нет).
   const commissionPct  = await withdrawalCommissionPct(wr.source_balance);
   const amount         = parseFloat(wr.amount);
@@ -961,6 +968,8 @@ const ADMIN_SETTING_VALIDATORS = {
   referral_min_amount:       'price',
   // 0 = автопрогрев выключен, иначе интервал в часах (см. jobs/scheduleWarmup.js)
   warmup_auto_hours:         'non_negative',
+  // Показывается на главной вместо реального count(profiles) — пусто = показывать реальное число.
+  homepage_users_count_override: 'non_negative_or_empty',
 };
 
 function validateAdminSettingValue(key, value) {
@@ -982,12 +991,15 @@ function validateAdminSettingValue(key, value) {
     return null;
   }
 
+  if (kind === 'non_negative_or_empty' && String(value).trim() === '') return null;
+
   const num = Number(value);
   if (Number.isNaN(num)) return 'Значение должно быть числом';
   if (kind === 'percent' && (num < 0 || num > 100)) return 'Значение должно быть от 0 до 100';
   if (kind === 'positive_int' && (!Number.isInteger(num) || num <= 0)) return 'Значение должно быть положительным целым числом';
   if (kind === 'price' && num < 0) return 'Значение должно быть неотрицательным числом';
   if (kind === 'non_negative' && num < 0) return 'Значение должно быть неотрицательным числом';
+  if (kind === 'non_negative_or_empty' && (!Number.isInteger(num) || num < 0)) return 'Значение должно быть неотрицательным целым числом или пустым';
   return null;
 }
 
@@ -1410,7 +1422,7 @@ router.get('/market-categories', async (req, res) => {
 });
 
 // POST /admin/market-categories
-router.post('/market-categories', async (req, res) => {
+router.post('/market-categories', adminMiddleware.requireOwner, async (req, res) => {
   const { name, icon, sort_order } = req.body;
   if (!name?.trim()) return res.status(400).json({ error: 'Укажите название категории' });
   const { data, error } = await supabase
@@ -1421,8 +1433,81 @@ router.post('/market-categories', async (req, res) => {
   res.status(201).json(data);
 });
 
+// ─── Market category requests (owner) — заявки на новые категории от
+// пользователей, заведённые при создании заказа/услуги с незнакомым
+// названием (см. utils/marketCategories.js). Роуты объявлены раньше
+// PATCH/DELETE /market-categories/:id — иначе Express принял бы "requests"
+// за :id.
+
+// GET /admin/market-categories/requests?status=pending
+router.get('/market-categories/requests', async (req, res) => {
+  const status = ['pending', 'approved', 'rejected'].includes(req.query.status) ? req.query.status : 'pending';
+  const { data, error } = await supabase
+    .from('market_category_requests')
+    .select(`id, name, status, reject_reason, created_at, reviewed_at,
+      target_order_id, target_listing_id,
+      requester:profiles!market_category_requests_requested_by_fkey(id, nickname, profile_slug),
+      order:orders!market_category_requests_target_order_id_fkey(id, title),
+      listing:listings!market_category_requests_target_listing_id_fkey(id, title)`)
+    .eq('status', status)
+    .order('created_at', { ascending: false });
+  if (error) return serverError(res, error);
+  res.json(data ?? []);
+});
+
+// POST /admin/market-categories/requests/:id/approve
+router.post('/market-categories/requests/:id/approve', async (req, res) => {
+  const { data: reqRow } = await supabase.from('market_category_requests').select('*').eq('id', req.params.id).single();
+  if (!reqRow) return res.status(404).json({ error: 'Заявка не найдена' });
+  if (reqRow.status !== 'pending') return res.status(400).json({ error: 'Заявка уже рассмотрена' });
+
+  const { data: existing } = await supabase.from('market_categories').select('id').ilike('name', reqRow.name).maybeSingle();
+  if (!existing) {
+    const { error: catErr } = await supabase.from('market_categories')
+      .insert({ id: require('crypto').randomUUID(), name: reqRow.name, icon: null, sort_order: 99 });
+    if (catErr) return serverError(res, catErr, 'market-categories:approve');
+  }
+
+  const { error } = await supabase.from('market_category_requests')
+    .update({ status: 'approved', reviewed_by: req.userId, reviewed_at: new Date().toISOString() })
+    .eq('id', req.params.id);
+  if (error) return serverError(res, error);
+
+  notifyUser(reqRow.requested_by, 'category_approved', 'Новая категория принята',
+    `«${reqRow.name}» теперь доступна всем в списке категорий`, undefined);
+
+  res.json({ success: true });
+});
+
+// POST /admin/market-categories/requests/:id/reject  { reassign_to_id }
+router.post('/market-categories/requests/:id/reject', async (req, res) => {
+  const { reassign_to_id, reason } = req.body;
+  const { data: reqRow } = await supabase.from('market_category_requests').select('*').eq('id', req.params.id).single();
+  if (!reqRow) return res.status(404).json({ error: 'Заявка не найдена' });
+  if (reqRow.status !== 'pending') return res.status(400).json({ error: 'Заявка уже рассмотрена' });
+
+  let reassignName = null;
+  if (reassign_to_id) {
+    const { data: cat } = await supabase.from('market_categories').select('name').eq('id', reassign_to_id).maybeSingle();
+    if (!cat) return res.status(400).json({ error: 'Категория для переноса не найдена' });
+    reassignName = cat.name;
+    if (reqRow.target_order_id) await supabase.from('orders').update({ category: reassignName }).eq('id', reqRow.target_order_id);
+    if (reqRow.target_listing_id) await supabase.from('listings').update({ category: reassignName }).eq('id', reqRow.target_listing_id);
+  }
+
+  const { error } = await supabase.from('market_category_requests')
+    .update({ status: 'rejected', reject_reason: reason || null, reviewed_by: req.userId, reviewed_at: new Date().toISOString() })
+    .eq('id', req.params.id);
+  if (error) return serverError(res, error);
+
+  notifyUser(reqRow.requested_by, 'category_rejected', 'Новая категория не принята',
+    reassignName ? `«${reqRow.name}» не подошла — заказ/услуга переставлены на «${reassignName}»` : `«${reqRow.name}» не подошла`, undefined);
+
+  res.json({ success: true });
+});
+
 // PATCH /admin/market-categories/:id
-router.patch('/market-categories/:id', async (req, res) => {
+router.patch('/market-categories/:id', adminMiddleware.requireOwner, async (req, res) => {
   const { name, icon, sort_order } = req.body;
   const updates = {};
   if (name       !== undefined) updates.name       = name;
@@ -1435,7 +1520,7 @@ router.patch('/market-categories/:id', async (req, res) => {
 });
 
 // DELETE /admin/market-categories/:id
-router.delete('/market-categories/:id', async (req, res) => {
+router.delete('/market-categories/:id', adminMiddleware.requireOwner, async (req, res) => {
   const { error } = await supabase.from('market_categories').delete().eq('id', req.params.id);
   if (error) return serverError(res, error);
   res.json({ success: true });

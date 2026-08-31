@@ -6,6 +6,8 @@ const { serverError } = require('../utils/httpError');
 const { sendTelegram } = require('../utils/telegramNotify');
 const { vipDiscountPct, applyVipDiscount, parseLevelDiscounts } = require('../utils/vip');
 const { fetchAll } = require('../utils/pagedFetch');
+const cashera = require('../utils/cashera');
+const crypto = require('crypto');
 
 const router = Router();
 router.use(auth);
@@ -22,7 +24,7 @@ router.get('/', async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(5),
     supabase.from('withdrawal_requests')
-      .select('id, amount, card_number, withdrawal_method, source_balance, status, admin_comment, created_at')
+      .select('id, amount, phone_number, source_balance, status, admin_comment, created_at')
       .eq('user_id', req.userId)
       .order('created_at', { ascending: false })
       .limit(5),
@@ -31,7 +33,9 @@ router.get('/', async (req, res) => {
   if (profileRes.error) return serverError(res, profileRes.error);
 
   const prof = profileRes.data;
-  const frontendBase = (process.env.FRONTEND_URL || '').split(',')[0].trim();
+  // SITE_URL, не FRONTEND_URL — тот CORS-allowlist из нескольких origin (первый
+  // из них, ks1rex.github.io, не настоящий прод), см. utils/notify.js.
+  const frontendBase = (process.env.SITE_URL || '').trim().replace(/\/$/, '');
   const referralCode = prof?.referral_code ?? null;
 
   res.json({
@@ -129,11 +133,84 @@ router.get('/deposits', async (req, res) => {
   res.json(data ?? []);
 });
 
+// Same cap as the manual deposit_requests flow above — no product reason
+// for Cashera deposits to allow a bigger single top-up.
+const CASHERA_DEPOSIT_MAX = 500_000;
+
+// POST /wallet/cashera/deposits — creates a Cashera checkout (no
+// payment_method: buyer picks sbp/card/etc. on payment_url) and returns the
+// redirect link. The deposit itself is only credited by the /webhooks/cashera
+// handler once status becomes 'paid' — this endpoint never touches balance.
+router.post('/cashera/deposits', isBanned, async (req, res) => {
+  const amount = parseFloat(req.body.amount);
+  if (!amount || amount <= 0 || isNaN(amount))
+    return res.status(400).json({ error: 'Укажите сумму больше 0' });
+  if (amount > CASHERA_DEPOSIT_MAX)
+    return res.status(400).json({ error: 'Сумма слишком большая' });
+
+  const externalId = `cashera_dep_${crypto.randomUUID()}`;
+  const amountMinor = Math.round(amount * 100);
+  const frontendBase = (process.env.SITE_URL || '').trim().replace(/\/$/, '');
+
+  const { error: insertErr } = await supabase.from('cashera_transactions')
+    .insert({ external_id: externalId, user_id: req.userId, amount: amountMinor, currency: 'RUB', status: 'creating' });
+  if (insertErr) return serverError(res, insertErr, 'wallet:cashera:insert');
+
+  let tx;
+  try {
+    tx = await cashera.createTransaction({
+      amountMinor,
+      externalId,
+      description: 'Пополнение баланса Ebu.Gubkin',
+      callbackUrl: process.env.CASHERA_CALLBACK_URL,
+      successUrl: frontendBase ? `${frontendBase}/wallet?cashera=ok` : undefined,
+      failUrl: frontendBase ? `${frontendBase}/wallet?cashera=fail` : undefined,
+    });
+  } catch (err) {
+    await supabase.from('cashera_transactions').update({ status: 'create_failed', updated_at: new Date().toISOString() }).eq('external_id', externalId);
+    if (err.status === 422) return res.status(422).json({ error: 'Способ оплаты недоступен', details: err.body?.errors });
+    if (err.status === 429) return res.status(429).json({ error: 'Слишком много запросов к платёжному шлюзу, попробуйте позже' });
+    return serverError(res, err, 'wallet:cashera:create');
+  }
+
+  await supabase.from('cashera_transactions')
+    .update({ uuid: tx.uuid, status: tx.status ?? 'pending', updated_at: new Date().toISOString() })
+    .eq('external_id', externalId);
+
+  res.status(201).json({ external_id: externalId, payment_url: tx.payment_url });
+});
+
+// GET /wallet/cashera/deposits/:external_id/sync — manual reconciliation if
+// the webhook never arrived: re-fetches status from Cashera and applies it
+// through the same idempotent RPC the webhook uses.
+router.get('/cashera/deposits/:external_id/sync', async (req, res) => {
+  const { data: row, error } = await supabase.from('cashera_transactions')
+    .select('external_id, user_id, status')
+    .eq('external_id', req.params.external_id)
+    .eq('user_id', req.userId)
+    .maybeSingle();
+  if (error) return serverError(res, error, 'wallet:cashera:sync:lookup');
+  if (!row) return res.status(404).json({ error: 'Транзакция не найдена' });
+
+  let tx;
+  try {
+    tx = await cashera.getTransactionByExternalId(req.params.external_id);
+  } catch (err) {
+    if (err.status === 404) return res.status(404).json({ error: 'Транзакция не найдена в Cashera' });
+    return serverError(res, err, 'wallet:cashera:sync:fetch');
+  }
+
+  const { error: rpcErr } = await cashera.applyTransaction(supabase, tx);
+  if (rpcErr) return serverError(res, rpcErr, 'wallet:cashera:sync:apply');
+
+  res.json({ status: tx.status });
+});
+
 // GET /wallet/withdrawals — full history
 router.get('/withdrawals', async (req, res) => {
   const { data, error } = await supabase
     .from('withdrawal_requests')
-    .select('id, amount, card_number, withdrawal_method, source_balance, status, admin_comment, created_at')
+    .select('id, amount, phone_number, source_balance, status, admin_comment, created_at')
     .eq('user_id', req.userId)
     .order('created_at', { ascending: false })
     .limit(100);
@@ -178,35 +255,38 @@ router.get('/referrals', async (req, res) => {
   })));
 });
 
-// Минимум вывода зависит от способа: СБП дешевле в обработке, карта — дороже.
-const WITHDRAWAL_MIN = { sbp: 500, card: 4000 };
-const METHOD_LABEL   = { sbp: 'СБП', card: 'карта' };
-const SOURCE_LABEL   = { deposited: 'занесённый', earned: 'заработанный' };
+// Вывод теперь только на номер телефона (СБП) — способ оплаты выбирать
+// больше не нужно, карта убрана вместе с её отдельным минимумом 4000 ₽.
+const WITHDRAWAL_MIN = 500;
+const SOURCE_LABEL = { deposited: 'занесённый', earned: 'заработанный' };
+// Разрешаем цифры, пробелы, дефисы, скобки и ведущий +; итоговое число цифр — 10 или 11
+// (с/без кода страны), как у обычного российского номера.
+const PHONE_RE = /^\+?[\d\s\-()]{10,20}$/;
+function isValidPhone(raw) {
+  if (!PHONE_RE.test(raw)) return false;
+  const digits = raw.replace(/\D/g, '');
+  return digits.length === 10 || digits.length === 11;
+}
 
 // POST /wallet/withdrawals — create withdrawal request (deducts balance as reserve)
 //
 // Заявка всегда с одного баланса: смешанного вывода нет. Если на занесённом
 // не хватает, а на заработанном есть — это две отдельные заявки, потому что у
-// них разная комиссия (10% против 0%), и одна строка withdrawal_requests не
+// них разная комиссия (15% против 0%), и одна строка withdrawal_requests не
 // может нести две ставки сразу.
 router.post('/withdrawals', isBanned, async (req, res) => {
   const amount = parseFloat(req.body.amount);
-  const card_number = req.body.card_number?.trim();
-  const method = req.body.withdrawal_method ?? 'sbp';
+  const phone_number = req.body.phone_number?.trim();
   const source = req.body.source_balance ?? 'deposited';
 
   if (!amount || amount <= 0 || isNaN(amount))
     return res.status(400).json({ error: 'Укажите сумму больше 0' });
-  if (!WITHDRAWAL_MIN[method])
-    return res.status(400).json({ error: 'Некорректный способ вывода (sbp/card)' });
   if (!SOURCE_LABEL[source])
     return res.status(400).json({ error: 'Некорректный баланс списания (deposited/earned)' });
-  if (amount < WITHDRAWAL_MIN[method])
-    return res.status(400).json({ error: `Минимальная сумма вывода на ${METHOD_LABEL[method]} — ${WITHDRAWAL_MIN[method]} ₽` });
-  if (!card_number)
-    return res.status(400).json({ error: 'Укажите реквизиты для вывода' });
-  if (card_number.length > 100)
-    return res.status(400).json({ error: 'Реквизиты слишком длинные' });
+  if (amount < WITHDRAWAL_MIN)
+    return res.status(400).json({ error: `Минимальная сумма вывода — ${WITHDRAWAL_MIN} ₽` });
+  if (!phone_number || !isValidPhone(phone_number))
+    return res.status(400).json({ error: 'Укажите номер телефона в формате +7 900 123-45-67' });
 
   // Atomic deduct from the chosen bucket only — fails if that bucket is short,
   // даже если суммарного баланса хватило бы.
@@ -221,8 +301,7 @@ router.post('/withdrawals', isBanned, async (req, res) => {
 
   const { data, error } = await supabase
     .from('withdrawal_requests')
-    .insert({ user_id: req.userId, amount, card_number, status: 'pending',
-              withdrawal_method: method, source_balance: source })
+    .insert({ user_id: req.userId, amount, phone_number, status: 'pending', source_balance: source })
     .select()
     .single();
 
@@ -236,7 +315,7 @@ router.post('/withdrawals', isBanned, async (req, res) => {
   const { data: prof } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
   sendTelegram(
     `💸 Заявка на вывод\nПользователь: @${prof?.nickname ?? req.userId}\n` +
-    `Сумма: ${amount} ₽ (${SOURCE_LABEL[source]} баланс) на ${METHOD_LABEL[method]}: ${card_number}`
+    `Сумма: ${amount} ₽ (${SOURCE_LABEL[source]} баланс) на телефон: ${phone_number}`
   );
 
   res.status(201).json(data);

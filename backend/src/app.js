@@ -23,9 +23,12 @@ const notificationsRouter  = require('./routes/notifications');
 const telegramRouter       = require('./routes/telegram');
 const newsRouter           = require('./routes/news');
 const teachersRouter       = require('./routes/teachers');
+const casheraRouter        = require('./routes/cashera');
 const { startForumAIJob }  = require('./utils/forumModerator');
 const { startVipExpiryJob } = require('./utils/vipExpiry');
 const { startWarmupScheduleJob } = require('./jobs/scheduleWarmup');
+const { startChatRetentionJob } = require('./utils/chatRetention');
+const { startOrphanMediaSweepJob } = require('./utils/mediaCleanup');
 const { registerTelegramWebhook } = require('./utils/registerTelegramWebhook');
 
 const app = express();
@@ -82,6 +85,7 @@ app.use('/notifications',  notificationsRouter);
 app.use('/telegram',       telegramRouter);
 app.use('/news',           newsRouter);
 app.use('/teachers',       teachersRouter);
+app.use('/webhooks',       casheraRouter);
 
 // Start background AI forum moderation (fire-and-forget, every 10 min)
 startForumAIJob();
@@ -92,6 +96,16 @@ startVipExpiryJob();
 // Schedule-warmup autostart + stuck-'running' watchdog (every 15 min; a no-op
 // unless admin_settings.warmup_auto_hours is set above 0)
 startWarmupScheduleJob();
+
+// Chat retention: delete attachments >180 days old, whole conversations
+// closed >1 year ago (daily)
+startChatRetentionJob();
+
+// Orphaned listing-media sweep: DISABLED 2026-08-30 — caused a mass
+// deletion of legitimately-referenced forum attachments on first run,
+// root cause not yet fixed. Do not re-enable until isUrlStillUsed's
+// containment check is verified correct against live data.
+// startOrphanMediaSweepJob();
 
 // Регистрирует POST /telegram/webhook у Telegram как приёмник апдейтов
 // пользовательского бота — no-op, если TELEGRAM_USER_BOT_TOKEN/

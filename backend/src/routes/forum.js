@@ -7,6 +7,7 @@ const { serverError }  = require('../utils/httpError');
 const { grantAchievement } = require('../utils/reputation');
 const { withIsVip } = require('../utils/vip');
 const { notifyUser } = require('../utils/notify');
+const { deleteUrlsIfUnused } = require('../utils/mediaCleanup');
 
 const router   = Router();
 const PAGE_SIZE = 20;
@@ -14,6 +15,7 @@ const PAGE_SIZE = 20;
 // пролистывать сотни сообщений, чтобы добраться до формы ответа внизу.
 const POSTS_PAGE_SIZE = 10;
 const MAX_ATTACHMENTS = 6; // держим в паре с ebu.gubkin/src/lib/attachments.ts
+const MAX_THREADS_PER_HOUR = 10; // антиспам-потолок на создание тем
 
 // Упоминание в посте — фронт вставляет его как "@ник " (см.
 // useForumAttachments / ForumThread.tsx), так что ник — это всё до
@@ -75,12 +77,14 @@ async function activeCategoryIds() {
 }
 
 // ── GET /forum/categories ─────────────────────────────────────────────────────
+// ?parent_id=<uuid> lists subcategories of that category (one-off nesting for
+// the "Учёба" VK-materials import — a category can hold child categories,
+// e.g. факультет folders, instead of threads directly). Omitted = top-level
+// categories only (parent_id IS NULL), same as before this existed.
 router.get('/categories', async (req, res) => {
-  const { data: cats, error } = await supabase
-    .from('forum_categories')
-    .select('*')
-    .eq('is_active', true)
-    .order('sort_order');
+  let q = supabase.from('forum_categories').select('*').eq('is_active', true).order('sort_order');
+  q = req.query.parent_id ? q.eq('parent_id', req.query.parent_id) : q.is('parent_id', null);
+  const { data: cats, error } = await q;
   if (error) return serverError(res, error, 'forum:categories');
   if (!cats.length) return res.json([]);
 
@@ -90,10 +94,19 @@ router.get('/categories', async (req, res) => {
   // тест 27.08.2026). Вместо этого один запрос всех тем нужных категорий,
   // группировка на count/recent_threads делается уже здесь, в Node.
   const catIds = cats.map(c => c.id);
+
+  // Категория-контейнер (есть подкатегории, см. параметр parent_id выше)
+  // сама тем не носит — её "N тем" должно суммировать темы её детей, иначе
+  // счётчик на главной форума показывает 0 для, например, "Учёба".
+  const { data: children } = await supabase.from('forum_categories').select('id, parent_id').in('parent_id', catIds);
+  const childrenByParent = {};
+  for (const c of children ?? []) (childrenByParent[c.parent_id] ??= []).push(c.id);
+  const allCatIds = [...catIds, ...(children ?? []).map(c => c.id)];
+
   const { data: threads, error: tErr } = await supabase
     .from('forum_threads')
     .select('id, category_id, title, last_post_at, last_post_author:profiles!forum_threads_last_post_author_id_fkey(nickname, profile_slug, avatar_url)')
-    .in('category_id', catIds)
+    .in('category_id', allCatIds)
     .order('last_post_at', { ascending: false, nullsFirst: false });
   if (tErr) return serverError(res, tErr, 'forum:categories:threads');
 
@@ -101,9 +114,13 @@ router.get('/categories', async (req, res) => {
   for (const t of threads ?? []) (byCategory[t.category_id] ??= []).push(t);
 
   const result = cats.map(cat => {
-    const list = byCategory[cat.id] ?? [];
-    const recent_threads = list.slice(0, 2);
-    return { ...cat, threads_count: list.length, recent_threads, last_thread: recent_threads[0] ?? null };
+    const ownList = byCategory[cat.id] ?? [];
+    const childIds = childrenByParent[cat.id] ?? [];
+    const allList = childIds.length
+      ? [...ownList, ...childIds.flatMap(id => byCategory[id] ?? [])].sort((a, b) => (b.last_post_at ?? '').localeCompare(a.last_post_at ?? ''))
+      : ownList;
+    const recent_threads = allList.slice(0, 2);
+    return { ...cat, threads_count: allList.length, recent_threads, last_thread: recent_threads[0] ?? null };
   });
 
   res.json(result);
@@ -203,6 +220,15 @@ router.post('/threads', auth, isBanned, async (req, res) => {
   if (content.trim().length > 10000) return res.status(400).json({ error: 'Текст не более 10 000 символов' });
   const safeAttachments = Array.isArray(attachments) ? attachments.slice(0, MAX_ATTACHMENTS) : [];
 
+  // Против спама: не больше MAX_THREADS_PER_HOUR тем в час на пользователя.
+  const hourAgo = new Date(Date.now() - 3600000).toISOString();
+  const { count: recentCount } = await supabase
+    .from('forum_threads').select('id', { count: 'exact', head: true })
+    .eq('author_id', req.userId).gte('created_at', hourAgo);
+  if ((recentCount ?? 0) >= MAX_THREADS_PER_HOUR) {
+    return res.status(429).json({ error: `Не больше ${MAX_THREADS_PER_HOUR} новых тем в час — попробуйте позже` });
+  }
+
   const { data: cat } = await supabase
     .from('forum_categories').select('is_active').eq('id', category_id).maybeSingle();
   if (!cat || cat.is_active === false) return res.status(400).json({ error: 'Категория недоступна' });
@@ -236,6 +262,27 @@ router.post('/threads', auth, isBanned, async (req, res) => {
   notifyMentions(content, req.userId, authorProf?.nickname, thread.id, title.trim());
 
   res.status(201).json({ thread_id: thread.id });
+});
+
+// ── DELETE /forum/threads/:id — автор темы, админ или владелец ───────────────
+router.delete('/threads/:id', auth, async (req, res) => {
+  const { data: thread } = await supabase.from('forum_threads').select('id, author_id, title, cover_url').eq('id', req.params.id).single();
+  if (!thread) return res.status(404).json({ error: 'Тема не найдена' });
+
+  const { data: prof } = await supabase.from('profiles').select('is_admin').eq('id', req.userId).single();
+  const isOwnThread = thread.author_id === req.userId;
+  if (!isOwnThread && !prof?.is_admin) return res.status(403).json({ error: 'Forbidden' });
+
+  const { data: posts } = await supabase.from('forum_posts').select('attachments').eq('thread_id', req.params.id);
+
+  // forum_posts.thread_id -> ON DELETE CASCADE — удаляются вместе с темой.
+  const { error } = await supabase.from('forum_threads').delete().eq('id', req.params.id);
+  if (error) return serverError(res, error, 'forum:delete-thread');
+
+  const urls = [thread.cover_url, ...(posts ?? []).flatMap(p => (p.attachments ?? []).map(a => a?.url))];
+  deleteUrlsIfUnused(urls).catch(() => {});
+
+  res.json({ success: true });
 });
 
 // ── POST /forum/threads/:id/view ─────────────────────────────────────────────
