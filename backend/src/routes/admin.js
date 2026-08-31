@@ -582,7 +582,7 @@ router.get('/withdrawals', async (req, res) => {
   const { status } = req.query;
   let q = supabase
     .from('withdrawal_requests')
-    .select('id, amount, phone_number, source_balance, status, admin_comment, created_at, user:profiles!withdrawal_requests_user_id_fkey(id, nickname)')
+    .select('id, amount, phone_number, bank_name, source_balance, status, admin_comment, created_at, user:profiles!withdrawal_requests_user_id_fkey(id, nickname)')
     .order('created_at', { ascending: false });
   if (status) q = q.eq('status', status);
   const { data, error } = await q;

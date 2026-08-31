@@ -3,7 +3,7 @@ const auth = require('../middleware/auth');
 const isBanned = require('../middleware/isBanned');
 const supabase = require('../supabase_client');
 const { serverError } = require('../utils/httpError');
-const { sendTelegram } = require('../utils/telegramNotify');
+const { sendTelegram, sendTelegramToOwner } = require('../utils/telegramNotify');
 const { vipDiscountPct, applyVipDiscount, parseLevelDiscounts } = require('../utils/vip');
 const { fetchAll } = require('../utils/pagedFetch');
 const cashera = require('../utils/cashera');
@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
       .order('created_at', { ascending: false })
       .limit(5),
     supabase.from('withdrawal_requests')
-      .select('id, amount, phone_number, source_balance, status, admin_comment, created_at')
+      .select('id, amount, phone_number, bank_name, source_balance, status, admin_comment, created_at')
       .eq('user_id', req.userId)
       .order('created_at', { ascending: false })
       .limit(5),
@@ -213,7 +213,7 @@ router.get('/cashera/deposits/:external_id/sync', async (req, res) => {
 router.get('/withdrawals', async (req, res) => {
   const { data, error } = await supabase
     .from('withdrawal_requests')
-    .select('id, amount, phone_number, source_balance, status, admin_comment, created_at')
+    .select('id, amount, phone_number, bank_name, source_balance, status, admin_comment, created_at')
     .eq('user_id', req.userId)
     .order('created_at', { ascending: false })
     .limit(100);
@@ -280,6 +280,7 @@ function isValidPhone(raw) {
 router.post('/withdrawals', isBanned, async (req, res) => {
   const amount = parseFloat(req.body.amount);
   const phone_number = req.body.phone_number?.trim();
+  const bank_name = req.body.bank_name?.trim();
   const source = req.body.source_balance ?? 'deposited';
 
   if (!amount || amount <= 0 || isNaN(amount))
@@ -290,6 +291,10 @@ router.post('/withdrawals', isBanned, async (req, res) => {
     return res.status(400).json({ error: `Минимальная сумма вывода — ${WITHDRAWAL_MIN} ₽` });
   if (!phone_number || !isValidPhone(phone_number))
     return res.status(400).json({ error: 'Укажите номер телефона в формате +7 900 123-45-67' });
+  if (!bank_name)
+    return res.status(400).json({ error: 'Укажите банк для перевода' });
+  if (bank_name.length > 100)
+    return res.status(400).json({ error: 'Слишком длинное название банка' });
 
   // Atomic deduct from the chosen bucket only — fails if that bucket is short,
   // даже если суммарного баланса хватило бы.
@@ -304,7 +309,7 @@ router.post('/withdrawals', isBanned, async (req, res) => {
 
   const { data, error } = await supabase
     .from('withdrawal_requests')
-    .insert({ user_id: req.userId, amount, phone_number, status: 'pending', source_balance: source })
+    .insert({ user_id: req.userId, amount, phone_number, bank_name, status: 'pending', source_balance: source })
     .select()
     .single();
 
@@ -316,9 +321,12 @@ router.post('/withdrawals', isBanned, async (req, res) => {
   }
 
   const { data: prof } = await supabase.from('profiles').select('nickname').eq('id', req.userId).single();
-  sendTelegram(
+  // Owner-only: содержит реквизиты для ручного перевода (телефон + банк),
+  // остальным админам это видеть не нужно.
+  sendTelegramToOwner(
     `💸 Заявка на вывод\nПользователь: @${prof?.nickname ?? req.userId}\n` +
-    `Сумма: ${amount} ₽ (${SOURCE_LABEL[source]} баланс) на телефон: ${phone_number}`
+    `Сумма: ${amount} ₽ (${SOURCE_LABEL[source]} баланс)\n` +
+    `Телефон: ${phone_number}\nБанк: ${bank_name}`
   );
 
   res.status(201).json(data);
