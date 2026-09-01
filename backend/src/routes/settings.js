@@ -22,8 +22,8 @@ router.get('/public/commissions', auth, async (req, res) => {
   };
   res.json({
     withdrawal_commission_pct: num('withdrawal_commission_pct', 15),
-    marketplace_commission_pct: num('marketplace_commission_pct', 10),
-    paritypay_commission_pct: num('paritypay_commission_pct', 1.8),
+    marketplace_commission_pct: num('marketplace_commission_pct', 11),
+    paritypay_commission_pct: num('paritypay_commission_pct', 2),
   });
 });
 

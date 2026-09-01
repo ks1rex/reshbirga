@@ -1065,7 +1065,7 @@ router.get('/finance/summary', async (req, res) => {
   // p_price). It was missing from this summary entirely.
   const vip_revenue           = sumBy('vip_purchase', 'platform_profit');
   const vip_purchases_count   = txs.filter(t => t.type === 'vip_purchase').length;
-  // Комиссия биржи (+10% к цене для покупателя) пишется в platform_profit
+  // Комиссия биржи (+marketplace_commission_pct% к цене для покупателя) пишется в platform_profit
   // выплаты исполнителю и признаётся в момент завершения сделки.
   const commission_marketplace = sumBy('order_payout', 'platform_profit');
   const total_platform_profit = round2(commission_regular + commission_referral - referral_bonuses_paid + gost_tokens_revenue + vip_revenue + commission_marketplace);

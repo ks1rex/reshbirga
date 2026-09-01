@@ -215,7 +215,7 @@ const PARITYPAY_DEPOSIT_MAX = 500_000;
 async function paritypayCommissionPct() {
   const { data } = await supabase.from('admin_settings').select('value').eq('key', 'paritypay_commission_pct').maybeSingle();
   const pct = parseFloat(data?.value);
-  return Number.isFinite(pct) ? pct : 1.8;
+  return Number.isFinite(pct) ? pct : 2;
 }
 
 // POST /wallet/paritypay/deposits — SBP deposit via ParityPay, second (and

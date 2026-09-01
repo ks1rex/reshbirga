@@ -2,7 +2,7 @@
 // но покупатель платит цену + pct%, а продавец получает цену целиком.
 // Разница — доход платформы, признаётся при завершении сделки
 // (transactions.platform_profit на выплате исполнителю).
-const DEFAULT_MARKETPLACE_COMMISSION_PCT = 10;
+const DEFAULT_MARKETPLACE_COMMISSION_PCT = 11;
 
 const round2 = n => Math.round(n * 100) / 100;
 
