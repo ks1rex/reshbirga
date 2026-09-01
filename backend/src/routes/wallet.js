@@ -7,6 +7,7 @@ const { sendTelegram, sendTelegramToOwner } = require('../utils/telegramNotify')
 const { vipDiscountPct, applyVipDiscount, parseLevelDiscounts } = require('../utils/vip');
 const { fetchAll } = require('../utils/pagedFetch');
 const cashera = require('../utils/cashera');
+const paritypay = require('../utils/paritypay');
 const crypto = require('crypto');
 
 const router = Router();
@@ -207,6 +208,93 @@ router.get('/cashera/deposits/:external_id/sync', async (req, res) => {
   if (rpcErr) return serverError(res, rpcErr, 'wallet:cashera:sync:apply');
 
   res.json({ status: tx.status });
+});
+
+const PARITYPAY_DEPOSIT_MAX = 500_000;
+
+async function paritypayCommissionPct() {
+  const { data } = await supabase.from('admin_settings').select('value').eq('key', 'paritypay_commission_pct').maybeSingle();
+  const pct = parseFloat(data?.value);
+  return Number.isFinite(pct) ? pct : 1.8;
+}
+
+// POST /wallet/paritypay/deposits — SBP deposit via ParityPay, second (and
+// only SBP) deposit method alongside Cashera's crypto-only one above. Unlike
+// Cashera, this one carries a customer-facing fee: the amount the customer
+// pays and the amount credited to their balance are different numbers.
+// credit_amount is computed and stored HERE, at creation time — the webhook
+// handler (process_paritypay_webhook) credits exactly this stored figure,
+// never a number derived from ParityPay's own `credited` field (that's the
+// gateway's actual, much larger cut, mostly absorbed by the platform — see
+// the migration's comment).
+router.post('/paritypay/deposits', isBanned, async (req, res) => {
+  const amount = parseFloat(req.body.amount);
+  if (!amount || amount <= 0 || isNaN(amount))
+    return res.status(400).json({ error: 'Укажите сумму больше 0' });
+  if (amount > PARITYPAY_DEPOSIT_MAX)
+    return res.status(400).json({ error: 'Сумма слишком большая' });
+
+  const pct = await paritypayCommissionPct();
+  const creditAmount = Math.round(amount * (1 - pct / 100) * 100) / 100;
+
+  const externalId = `paritypay_dep_${crypto.randomUUID()}`;
+  const frontendBase = (process.env.SITE_URL || '').trim().replace(/\/$/, '');
+
+  const { error: insertErr } = await supabase.from('paritypay_transactions')
+    .insert({ external_id: externalId, user_id: req.userId, pay_amount: amount, credit_amount: creditAmount, status: 'creating' });
+  if (insertErr) return serverError(res, insertErr, 'wallet:paritypay:insert');
+
+  let invoice;
+  try {
+    invoice = await paritypay.createInvoice({
+      amount,
+      orderId: externalId,
+      comment: 'Пополнение баланса Ebu.Gubkin',
+      callbackUrl: process.env.PARITYPAY_CALLBACK_URL,
+      successUrl: frontendBase ? `${frontendBase}/wallet?paritypay=ok` : undefined,
+      failUrl: frontendBase ? `${frontendBase}/wallet?paritypay=fail` : undefined,
+    });
+  } catch (err) {
+    await supabase.from('paritypay_transactions').update({ status: 'create_failed', updated_at: new Date().toISOString() }).eq('external_id', externalId);
+    return serverError(res, err, 'wallet:paritypay:create');
+  }
+
+  await supabase.from('paritypay_transactions')
+    .update({ invoice_id: invoice.id, status: invoice.status ?? 'NEW', updated_at: new Date().toISOString() })
+    .eq('external_id', externalId);
+
+  res.status(201).json({ external_id: externalId, payment_url: invoice.link, credit_amount: creditAmount });
+});
+
+// GET /wallet/paritypay/deposits/:external_id/sync — manual reconciliation,
+// same role as the Cashera one above.
+router.get('/paritypay/deposits/:external_id/sync', async (req, res) => {
+  const { data: row, error } = await supabase.from('paritypay_transactions')
+    .select('external_id, user_id, status')
+    .eq('external_id', req.params.external_id)
+    .eq('user_id', req.userId)
+    .maybeSingle();
+  if (error) return serverError(res, error, 'wallet:paritypay:sync:lookup');
+  if (!row) return res.status(404).json({ error: 'Транзакция не найдена' });
+
+  let invoice;
+  try {
+    invoice = await paritypay.getInvoiceStatus({ orderId: req.params.external_id });
+  } catch (err) {
+    if (err.status === 404) return res.status(404).json({ error: 'Транзакция не найдена в ParityPay' });
+    return serverError(res, err, 'wallet:paritypay:sync:fetch');
+  }
+
+  const { error: rpcErr } = await supabase.rpc('process_paritypay_webhook', {
+    p_external_id: invoice.order_id,
+    p_invoice_id: invoice.id ?? null,
+    p_new_status: invoice.status,
+    p_amount: invoice.amount,
+    p_parity_credited: invoice.credited ?? null,
+  });
+  if (rpcErr) return serverError(res, rpcErr, 'wallet:paritypay:sync:apply');
+
+  res.json({ status: invoice.status });
 });
 
 // GET /wallet/withdrawals — full history

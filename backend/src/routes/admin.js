@@ -951,6 +951,7 @@ router.put('/settings/:key', async (req, res) => {
 // ponytail: flat lookup table, add an entry here when adding a new tunable setting.
 const ADMIN_SETTING_VALIDATORS = {
   withdrawal_commission_pct: 'percent',
+  paritypay_commission_pct: 'percent',
   // наценка покупателю на бирже: +% сверх отображаемой цены, продавцу — цена целиком
   marketplace_commission_pct: 'percent',
   vip_token_discount_pct:    'percent',
